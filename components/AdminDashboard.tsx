@@ -25,6 +25,15 @@ interface SentMessage {
   error_message?: string;
 }
 
+const getFileExtensionFromMimeType = (mimeType: string): string => {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes('png')) return 'png';
+  if (normalized.includes('webp')) return 'webp';
+  if (normalized.includes('gif')) return 'gif';
+  if (normalized.includes('jpeg') || normalized.includes('jpg')) return 'jpg';
+  return 'jpg';
+};
+
 const AdminDashboard: React.FC<Props> = ({ onBack }) => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [pin, setPin] = useState('');
@@ -183,19 +192,25 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
       const downloadUrl = photo.fullSizeUrl || photo.dataUrl;
 
       if (downloadUrl.startsWith('data:')) {
+        const mimeType = downloadUrl.match(/^data:(.*?);base64,/)?.[1] || 'image/jpeg';
+        const extension = getFileExtensionFromMimeType(mimeType);
         const link = document.createElement('a');
         link.href = downloadUrl;
-        link.download = `deep-blue-archive-${photo.id}.jpg`;
+        link.download = `deep-blue-archive-${photo.id}.${extension}`;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
       } else {
         const response = await fetch(downloadUrl);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch photo (${response.status})`);
+        }
         const blob = await response.blob();
+        const extension = getFileExtensionFromMimeType(blob.type || 'image/jpeg');
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
-        link.download = `deep-blue-archive-${photo.id}.jpg`;
+        link.download = `deep-blue-archive-${photo.id}.${extension}`;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);

@@ -5,6 +5,7 @@ import { savePhotoToGallery } from '../utils/storage';
 import { uploadBlobToR2 } from '../utils/r2Storage';
 import { Save, Palette, Image as ImageIcon, Sliders, X, RotateCw, QrCode, Play, Pause, Video } from 'lucide-react';
 import { getCustomStickers, CustomSticker } from '../utils/stickerStorage';
+import { SVG_STRINGS } from './AssetLibrary';
 import PhoneInputModal from './PhoneInputModal';
 import QRCode from 'qrcode';
 
@@ -32,13 +33,29 @@ const FRAME_COLORS = [
 const COMPOSITE_VIDEO_WIDTH = 960;
 const COMPOSITE_VIDEO_HEIGHT = 1440;
 const COMPOSITE_GAP = 12;
-const COMPOSITE_SIDE_PADDING = 16;
 const COMPOSITE_TOP_PADDING = 24;
 const COMPOSITE_BOTTOM_PADDING = 24;
-const COMPOSITE_FALLBACK_DURATION = 3;
+const COMPOSITE_CANVAS_PADDING = 16;
+const COMPOSITE_CONTENT_SIDE_PADDING = 8;
+const COMPOSITE_CONTENT_BOTTOM_SPACER = 16;
+const COMPOSITE_SLOT_BORDER_WIDTH = 2;
+const COMPOSITE_SLOT_BORDER_COLOR = '#1f2937';
+const COMPOSITE_SLOT_BACKGROUND = '#0f172a';
+const COMPOSITE_STICKER_BASE_WIDTH = COMPOSITE_VIDEO_WIDTH * 0.125;
 const COMPOSITE_FRAME_RATE = 30;
 const COMPOSITE_TIMESLICE = 200;
 const DOWNLOAD_TOKEN_TTL_MS = 10 * 60 * 1000;
+const PREVIEW_VIDEO_REPLAY_COUNT = 1;
+const PREVIEW_VIDEO_DURATION_SECONDS = 3;
+
+const getReadableDownloadPath = (url: string): string => {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    return url;
+  }
+};
 
 const blobToDataUrl = (blob: Blob): Promise<string | null> => {
   return new Promise(resolve => {
@@ -142,13 +159,87 @@ const loadVideoElement = (src: string): Promise<HTMLVideoElement> => {
   });
 };
 
+const loadImageElement = (src: string): Promise<HTMLImageElement> => {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.crossOrigin = 'anonymous';
+
+    const onLoaded = () => {
+      cleanup();
+      resolve(image);
+    };
+
+    const onError = () => {
+      cleanup();
+      reject(new Error('Failed to load sticker image for composite video.'));
+    };
+
+    const cleanup = () => {
+      image.removeEventListener('load', onLoaded);
+      image.removeEventListener('error', onError);
+    };
+
+    image.addEventListener('load', onLoaded, { once: true });
+    image.addEventListener('error', onError, { once: true });
+    image.src = src;
+  });
+};
+
+const loadStickerForComposite = async (sticker: Sticker): Promise<{ sticker: Sticker; image: HTMLImageElement } | null> => {
+  const stickerType = String(sticker.type || '');
+
+  try {
+    if (!stickerType) return null;
+
+    if (sticker.isCustom || !SVG_STRINGS[stickerType]) {
+      const image = await loadImageElement(stickerType);
+      return { sticker, image };
+    }
+
+    const svgBlob = new Blob([SVG_STRINGS[stickerType]], { type: 'image/svg+xml;charset=utf-8' });
+    const objectUrl = URL.createObjectURL(svgBlob);
+    try {
+      const image = await loadImageElement(objectUrl);
+      return { sticker, image };
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+  } catch (error) {
+    console.warn('Unable to load sticker for composite video.', stickerType, error);
+    return null;
+  }
+};
+
+const drawCompositeStickers = (
+  ctx: CanvasRenderingContext2D,
+  loadedStickers: Array<{ sticker: Sticker; image: HTMLImageElement }>
+) => {
+  loadedStickers.forEach(({ sticker, image }) => {
+    const xPosition = (sticker.x / 100) * COMPOSITE_VIDEO_WIDTH;
+    const yPosition = (sticker.y / 100) * COMPOSITE_VIDEO_HEIGHT;
+    const width = COMPOSITE_STICKER_BASE_WIDTH * sticker.scale;
+    const aspectRatio = image.naturalWidth > 0 ? image.naturalHeight / image.naturalWidth : 1;
+    const height = width * aspectRatio;
+
+    ctx.save();
+    ctx.translate(xPosition, yPosition);
+    ctx.rotate((sticker.rotation * Math.PI) / 180);
+    ctx.shadowColor = 'rgba(0,0,0,0.15)';
+    ctx.shadowBlur = 10;
+    ctx.shadowOffsetY = 4;
+    ctx.drawImage(image, -width / 2, -height / 2, width, height);
+    ctx.restore();
+  });
+};
+
 const drawVideoCover = (
   ctx: CanvasRenderingContext2D,
   video: HTMLVideoElement,
   x: number,
   y: number,
   width: number,
-  height: number
+  height: number,
+  mirrored: boolean = false
 ) => {
   const sourceWidth = video.videoWidth || 1;
   const sourceHeight = video.videoHeight || 1;
@@ -168,23 +259,49 @@ const drawVideoCover = (
     cropY = (sourceHeight - cropHeight) / 2;
   }
 
-  ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, x, y, width, height);
+  if (!mirrored) {
+    ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, x, y, width, height);
+    return;
+  }
+
+  ctx.save();
+  ctx.translate(x + width, y);
+  ctx.scale(-1, 1);
+  ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, width, height);
+  ctx.restore();
 };
 
-const buildPostcardCompositeVideo = async (videoLayers: string[]): Promise<string | null> => {
+const buildPostcardCompositeVideo = async (
+  videoLayers: string[],
+  stickers: Sticker[],
+  frameColor: string
+): Promise<string | null> => {
   if (typeof MediaRecorder === 'undefined' || videoLayers.length === 0) {
     return null;
   }
 
   const layers = videoLayers.slice(0, 3);
-  const videos = await Promise.all(layers.map(loadVideoElement));
+  const videos = await Promise.all(
+    layers.map(async (layer) => {
+      const source = typeof layer === 'string' ? layer.trim() : '';
+      if (!source || !source.startsWith('data:')) {
+        return null;
+      }
 
-  const minDuration = Math.min(
-    ...videos.map(video =>
-      Number.isFinite(video.duration) && video.duration > 0
-        ? video.duration
-        : COMPOSITE_FALLBACK_DURATION
-    )
+      try {
+        return await loadVideoElement(source);
+      } catch (error) {
+        console.warn('Skipping an invalid video layer during postcard video composition.', error);
+        return null;
+      }
+    })
+  );
+  const playableVideos = videos.filter((video): video is HTMLVideoElement => Boolean(video));
+  if (playableVideos.length === 0) {
+    return null;
+  }
+  const loadedStickers = (await Promise.all(stickers.map(loadStickerForComposite))).filter(
+    (item): item is { sticker: Sticker; image: HTMLImageElement } => Boolean(item)
   );
 
   const canvas = document.createElement('canvas');
@@ -215,37 +332,73 @@ const buildPostcardCompositeVideo = async (videoLayers: string[]): Promise<strin
     };
   });
 
-  const contentHeight = COMPOSITE_VIDEO_HEIGHT - COMPOSITE_TOP_PADDING - COMPOSITE_BOTTOM_PADDING - (COMPOSITE_GAP * 2);
+  const contentHeight =
+    COMPOSITE_VIDEO_HEIGHT -
+    (COMPOSITE_CANVAS_PADDING * 2) -
+    COMPOSITE_TOP_PADDING -
+    COMPOSITE_BOTTOM_PADDING -
+    COMPOSITE_CONTENT_BOTTOM_SPACER -
+    (COMPOSITE_GAP * 2);
   const slotHeight = contentHeight / 3;
-  const slotWidth = COMPOSITE_VIDEO_WIDTH - (COMPOSITE_SIDE_PADDING * 2);
+  const slotWidth = COMPOSITE_VIDEO_WIDTH - (COMPOSITE_CANVAS_PADDING * 2) - (COMPOSITE_CONTENT_SIDE_PADDING * 2);
+  const slotX = COMPOSITE_CANVAS_PADDING + COMPOSITE_CONTENT_SIDE_PADDING;
+  const slotInset = COMPOSITE_SLOT_BORDER_WIDTH / 2;
 
   const drawFrame = () => {
-    ctx.fillStyle = '#000000';
+    ctx.fillStyle = frameColor;
     ctx.fillRect(0, 0, COMPOSITE_VIDEO_WIDTH, COMPOSITE_VIDEO_HEIGHT);
 
     for (let index = 0; index < 3; index += 1) {
-      const y = COMPOSITE_TOP_PADDING + index * (slotHeight + COMPOSITE_GAP);
+      const y = COMPOSITE_CANVAS_PADDING + COMPOSITE_TOP_PADDING + index * (slotHeight + COMPOSITE_GAP);
       const video = videos[index];
+      ctx.fillStyle = COMPOSITE_SLOT_BACKGROUND;
+      ctx.fillRect(slotX, y, slotWidth, slotHeight);
+
       if (video) {
-        drawVideoCover(ctx, video, COMPOSITE_SIDE_PADDING, y, slotWidth, slotHeight);
+        drawVideoCover(
+          ctx,
+          video,
+          slotX + slotInset,
+          y + slotInset,
+          Math.max(1, slotWidth - COMPOSITE_SLOT_BORDER_WIDTH),
+          Math.max(1, slotHeight - COMPOSITE_SLOT_BORDER_WIDTH),
+          true
+        );
       }
+
+      ctx.lineWidth = COMPOSITE_SLOT_BORDER_WIDTH;
+      ctx.strokeStyle = COMPOSITE_SLOT_BORDER_COLOR;
+      ctx.strokeRect(
+        slotX + slotInset,
+        y + slotInset,
+        Math.max(1, slotWidth - COMPOSITE_SLOT_BORDER_WIDTH),
+        Math.max(1, slotHeight - COMPOSITE_SLOT_BORDER_WIDTH)
+      );
     }
+
+    drawCompositeStickers(ctx, loadedStickers);
   };
 
   recorder.start(COMPOSITE_TIMESLICE);
-  videos.forEach(video => {
+  playableVideos.forEach(video => {
     video.currentTime = 0;
   });
-  await Promise.all(videos.map(video => video.play().catch(() => undefined)));
+  await Promise.all(playableVideos.map(video => video.play().catch(() => undefined)));
 
   let animationFrame = 0;
   const start = performance.now();
 
   await new Promise<void>(resolve => {
     const render = () => {
+      playableVideos.forEach(video => {
+        if (video.ended) {
+          video.currentTime = 0;
+          void video.play().catch(() => undefined);
+        }
+      });
       drawFrame();
       const elapsed = (performance.now() - start) / 1000;
-      if (elapsed >= minDuration) {
+      if (elapsed >= PREVIEW_VIDEO_DURATION_SECONDS) {
         resolve();
         return;
       }
@@ -258,13 +411,115 @@ const buildPostcardCompositeVideo = async (videoLayers: string[]): Promise<strin
     cancelAnimationFrame(animationFrame);
   }
 
-  videos.forEach(video => {
+  playableVideos.forEach(video => {
     video.pause();
   });
 
   if (recorder.state !== 'inactive') {
     recorder.stop();
   }
+
+  const blob = await stopped;
+  return blobToDataUrl(blob);
+};
+
+const buildMirroredSingleVideo = async (videoSource: string): Promise<string | null> => {
+  if (typeof MediaRecorder === 'undefined') {
+    return null;
+  }
+
+  const source = typeof videoSource === 'string' ? videoSource.trim() : '';
+  if (!source || !source.startsWith('data:')) {
+    return null;
+  }
+
+  let video: HTMLVideoElement;
+  try {
+    video = await loadVideoElement(source);
+  } catch (error) {
+    console.warn('Unable to load captured video for mirrored export.', error);
+    return null;
+  }
+
+  const outputWidth = Math.max(1, video.videoWidth || 1280);
+  const outputHeight = Math.max(1, video.videoHeight || 720);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = outputWidth;
+  canvas.height = outputHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return null;
+  }
+
+  const stream = canvas.captureStream(COMPOSITE_FRAME_RATE);
+  const mimeType = getSupportedCompositeMimeType();
+  let recorder: MediaRecorder;
+  try {
+    recorder = new MediaRecorder(stream, {
+      mimeType,
+      videoBitsPerSecond: 2_500_000
+    });
+  } catch (error) {
+    stream.getTracks().forEach(track => track.stop());
+    console.warn('Unable to initialize mirrored video recorder.', error);
+    return null;
+  }
+
+  const chunks: Blob[] = [];
+  recorder.ondataavailable = event => {
+    if (event.data && event.data.size > 0) {
+      chunks.push(event.data);
+    }
+  };
+
+  const stopped = new Promise<Blob>(resolve => {
+    recorder.onstop = () => {
+      resolve(new Blob(chunks, { type: mimeType }));
+    };
+  });
+
+  const drawFrame = () => {
+    ctx.save();
+    ctx.translate(outputWidth, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0, outputWidth, outputHeight);
+    ctx.restore();
+  };
+
+  recorder.start(COMPOSITE_TIMESLICE);
+  video.currentTime = 0;
+  await video.play().catch(() => undefined);
+
+  let animationFrame = 0;
+  const start = performance.now();
+
+  await new Promise<void>(resolve => {
+    const render = () => {
+      if (video.ended) {
+        video.currentTime = 0;
+        void video.play().catch(() => undefined);
+      }
+      drawFrame();
+      const elapsed = (performance.now() - start) / 1000;
+      if (elapsed >= PREVIEW_VIDEO_DURATION_SECONDS) {
+        resolve();
+        return;
+      }
+      animationFrame = requestAnimationFrame(render);
+    };
+    render();
+  });
+
+  if (animationFrame) {
+    cancelAnimationFrame(animationFrame);
+  }
+
+  video.pause();
+  if (recorder.state !== 'inactive') {
+    recorder.stop();
+  }
+  stream.getTracks().forEach(track => track.stop());
 
   const blob = await stopped;
   return blobToDataUrl(blob);
@@ -335,9 +590,19 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
         if (!video) return;
         video.pause();
         video.currentTime = 0;
+        delete video.dataset.previewReplayCount;
       });
       setIsVideoPlaying(false);
+      return;
     }
+
+    const timeoutId = window.setTimeout(() => {
+      void startPreviewVideoPlayback();
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
   }, [showVideoPreview]);
 
   const loadCustomStickers = async () => {
@@ -443,15 +708,61 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
     previewVideoRefs.current[index] = element;
   };
 
+  const getPreviewVideos = () =>
+    previewVideoRefs.current.filter((video): video is HTMLVideoElement => Boolean(video));
+
+  const syncPreviewVideoPlayingState = () => {
+    const videos = getPreviewVideos();
+    setIsVideoPlaying(videos.some(video => !video.paused && !video.ended));
+  };
+
+  const startPreviewVideoPlayback = async () => {
+    const videos = getPreviewVideos();
+    if (videos.length === 0) {
+      setIsVideoPlaying(false);
+      return;
+    }
+
+    try {
+      await Promise.all(
+        videos.map(video => {
+          video.dataset.previewReplayCount = '0';
+          video.currentTime = 0;
+          return video.play().catch(() => undefined);
+        })
+      );
+      syncPreviewVideoPlayingState();
+    } catch (err) {
+      console.error('Video preview playback failed:', err);
+      setIsVideoPlaying(false);
+    }
+  };
+
+  const handlePreviewVideoEnded = (video: HTMLVideoElement) => {
+    const replayCountRaw = Number(video.dataset.previewReplayCount ?? '0');
+    const replayCount = Number.isFinite(replayCountRaw) ? replayCountRaw : 0;
+
+    if (replayCount < PREVIEW_VIDEO_REPLAY_COUNT) {
+      video.dataset.previewReplayCount = String(replayCount + 1);
+      video.currentTime = 0;
+      void video.play().catch(() => {
+        syncPreviewVideoPlayingState();
+      });
+      return;
+    }
+
+    syncPreviewVideoPlayingState();
+  };
+
   const handleVideoPlaybackToggle = async () => {
     if (!hasVideoLayersForPreview) return;
 
     if (!showVideoPreview) {
       setShowVideoPreview(true);
-      await new Promise(resolve => setTimeout(resolve, 0));
+      return;
     }
 
-    const videos = previewVideoRefs.current.filter((video): video is HTMLVideoElement => Boolean(video));
+    const videos = getPreviewVideos();
     if (videos.length === 0) return;
 
     const currentlyPlaying = videos.some(video => !video.paused && !video.ended);
@@ -462,13 +773,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
     }
 
     try {
-      await Promise.all(
-        videos.map(video => {
-          video.currentTime = 0;
-          return video.play().catch(() => undefined);
-        })
-      );
-      setIsVideoPlaying(true);
+      await startPreviewVideoPlayback();
     } catch (err) {
       console.error('Video preview playback failed:', err);
       setIsVideoPlaying(false);
@@ -497,27 +802,38 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
 
       // Store the photo temporarily with the token for same-browser download page.
       let selectedVideoForDownload: string | null = captureVideos[0] || null;
+      let usedComposedVideo = false;
       if (layout === 'postcard' && captureVideos.length > 0) {
-        const composedPreviewVideo = await buildPostcardCompositeVideo(captureVideos);
-        if (composedPreviewVideo) {
-          selectedVideoForDownload = composedPreviewVideo;
+        try {
+          const composedPreviewVideo = await buildPostcardCompositeVideo(captureVideos, stickers, frameColor);
+          if (composedPreviewVideo) {
+            selectedVideoForDownload = composedPreviewVideo;
+            usedComposedVideo = true;
+          }
+        } catch (videoComposeError) {
+          console.warn('Postcard video composition failed, continuing with photo QR flow.', videoComposeError);
         }
       }
 
-      const expectedPreviewPath = `photos/${photoToken}-preview.jpg`;
-      const expectedFullPath = `photos/${photoToken}-full.jpg`;
+      if (selectedVideoForDownload && !usedComposedVideo) {
+        try {
+          const mirroredPreviewVideo = await buildMirroredSingleVideo(selectedVideoForDownload);
+          if (mirroredPreviewVideo) {
+            selectedVideoForDownload = mirroredPreviewVideo;
+          }
+        } catch (videoMirrorError) {
+          console.warn('Mirroring preview video failed, using original capture orientation.', videoMirrorError);
+        }
+      }
+
       const expectedVideoPath = selectedVideoForDownload
         ? await uploadVideoPreviewToR2(photoToken, selectedVideoForDownload)
         : null;
-      const downloadParams = new URLSearchParams({
-        preview: expectedPreviewPath,
-        full: expectedFullPath,
-        exp: String(expiresAt)
-      });
+      const downloadParams = new URLSearchParams();
       if (expectedVideoPath) {
-        downloadParams.set('video', expectedVideoPath);
+        downloadParams.set('v', '1');
       }
-      const downloadUrl = `${downloadBaseUrl}/download/${encodeURIComponent(photoToken)}?${downloadParams.toString()}`;
+      const downloadUrl = `${downloadBaseUrl}/download/${encodeURIComponent(photoToken)}${downloadParams.size ? `?${downloadParams.toString()}` : ''}`;
 
       // Generate QR code as data URL
       const qrCodeDataUrl = await QRCode.toDataURL(downloadUrl, {
@@ -535,6 +851,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
           dataUrl,
           photoId,
           captureVideo: selectedVideoForDownload,
+          captureVideoPath: expectedVideoPath,
           expiresAt
         }));
       } catch (storageError) {
@@ -552,7 +869,13 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
 
     } catch (err) {
       console.error('Error during save process:', err);
-      alert("Something went wrong while saving your photo. Please try again.");
+      const reason = err instanceof Error ? err.message : 'Unknown save error';
+
+      if (reason.toLowerCase().includes('r2 bucket binding is missing')) {
+        alert('Storage is not configured correctly. Please check your Cloudflare R2 binding.');
+      } else {
+        alert("Something went wrong while saving your photo. Please try again.");
+      }
     } finally {
       setIsExporting(false);
     }
@@ -718,22 +1041,12 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
                           <video
                             ref={(node) => setPreviewVideoRef(index, node)}
                             src={layerVideo}
+                            autoPlay
                             muted
                             playsInline
-                            loop
-                            className="absolute inset-0 w-full h-full object-cover"
-                            onPause={() => {
-                              const previews = previewVideoRefs.current.filter((video): video is HTMLVideoElement => Boolean(video));
-                              if (previews.every(video => video.paused || video.ended)) {
-                                setIsVideoPlaying(false);
-                              }
-                            }}
-                            onEnded={() => {
-                              const previews = previewVideoRefs.current.filter((video): video is HTMLVideoElement => Boolean(video));
-                              if (previews.every(video => video.paused || video.ended)) {
-                                setIsVideoPlaying(false);
-                              }
-                            }}
+                            className="absolute inset-0 w-full h-full object-cover transform -scale-x-100"
+                            onPause={syncPreviewVideoPlayingState}
+                            onEnded={(event) => handlePreviewVideoEnded(event.currentTarget)}
                           />
                         ) : (
                           <div className="absolute inset-0 flex items-center justify-center text-slate-500 text-xs uppercase tracking-widest">
@@ -1000,7 +1313,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
               </div>
               {qrDownloadUrl && (
                 <p className="mt-4 text-xs text-slate-400 break-all px-2">
-                  {qrDownloadUrl}
+                  {getReadableDownloadPath(qrDownloadUrl)}
                 </p>
               )}
             </div>

@@ -1,6 +1,6 @@
 import { supabase } from './supabase';
 import { compressImage } from './imageCompression';
-import { deleteR2Keys, getR2PublicUrl, uploadBlobToR2 } from './r2Storage';
+import { deleteR2Keys, getPhotoDeliveryUrl, uploadBlobToR2 } from './r2Storage';
 
 export interface SavedPhoto {
   id: string;
@@ -66,37 +66,61 @@ export const savePhotoToGallery = async (dataUrl: string, phoneNumber?: string):
     const fullStoragePath = `photos/${fullFileName}`;
     const previewStoragePath = `photos/${previewFileName}`;
 
-    const compressedPreview = await compressImage(dataUrl, 800, 0.7);
+    let compressedPreview = dataUrl;
+    try {
+      compressedPreview = await compressImage(dataUrl, 800, 0.7);
+    } catch (compressionError) {
+      console.warn('Preview compression failed, using original image data for preview.', compressionError);
+    }
 
     const fullBlob = dataUrlToBlob(dataUrl);
     const previewBlob = dataUrlToBlob(compressedPreview);
+    let uploadedToR2 = false;
 
     try {
       await Promise.all([
         uploadBlobToR2(fullStoragePath, fullBlob, 'image/jpeg'),
         uploadBlobToR2(previewStoragePath, previewBlob, 'image/jpeg')
       ]);
+      uploadedToR2 = true;
     } catch (uploadError) {
+      console.warn('R2 upload failed, saving photo with legacy image_data fallback.', uploadError);
       await deleteR2Keys([fullStoragePath, previewStoragePath]).catch(() => undefined);
-      throw uploadError;
     }
+
+    const insertPayload = uploadedToR2
+      ? {
+          id: photoId,
+          storage_path: fullStoragePath,
+          preview_path: previewStoragePath,
+          image_data: null,
+          phone_number: phoneNumber || null
+        }
+      : {
+          id: photoId,
+          storage_path: null,
+          preview_path: null,
+          image_data: dataUrl,
+          phone_number: phoneNumber || null
+        };
 
     const { error: dbError } = await supabase
       .from('photos')
-      .insert({
-        id: photoId,
-        storage_path: fullStoragePath,
-        preview_path: previewStoragePath,
-        phone_number: phoneNumber || null
-      });
+      .insert(insertPayload);
 
     if (dbError) {
       console.error("Error saving photo metadata to database:", dbError);
-      await deleteR2Keys([fullStoragePath, previewStoragePath]).catch(() => undefined);
+      if (uploadedToR2) {
+        await deleteR2Keys([fullStoragePath, previewStoragePath]).catch(() => undefined);
+      }
       throw dbError;
     }
 
-    console.log('Photo and preview saved to R2');
+    if (uploadedToR2) {
+      console.log('Photo and preview saved to R2');
+    } else {
+      console.log('Photo saved with legacy image_data fallback');
+    }
     return photoId;
   } catch (e) {
     console.error("Error saving photo:", e);
@@ -285,11 +309,11 @@ export const getGallery = async (page: number = 1, pageSize: number = 30): Promi
       let fullSizeUrl = '';
 
       if (photo.preview_path && photo.storage_path) {
-        dataUrl = getR2PublicUrl(photo.preview_path);
-        fullSizeUrl = getR2PublicUrl(photo.storage_path);
+        dataUrl = getPhotoDeliveryUrl(photo.preview_path);
+        fullSizeUrl = getPhotoDeliveryUrl(photo.storage_path);
       } else if (photo.storage_path) {
-        dataUrl = getR2PublicUrl(photo.storage_path);
-        fullSizeUrl = getR2PublicUrl(photo.storage_path);
+        dataUrl = getPhotoDeliveryUrl(photo.storage_path);
+        fullSizeUrl = getPhotoDeliveryUrl(photo.storage_path);
       } else if (legacyPhotosData[photo.id]) {
         dataUrl = legacyPhotosData[photo.id];
         fullSizeUrl = legacyPhotosData[photo.id];

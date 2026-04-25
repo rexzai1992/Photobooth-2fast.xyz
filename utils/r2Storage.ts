@@ -1,6 +1,8 @@
 const R2_PUBLIC_URL = (import.meta.env.VITE_R2_PUBLIC_URL || '').replace(/\/+$/, '');
+const SUPABASE_PUBLIC_URL = (import.meta.env.VITE_SUPABASE_URL || '').replace(/\/+$/, '');
 
 const normalizeKey = (key: string): string => key.replace(/^\/+/, '').trim();
+const ABSOLUTE_URL_PATTERN = /^https?:\/\//i;
 
 const readErrorMessage = async (response: Response): Promise<string> => {
   try {
@@ -20,11 +22,40 @@ export const getR2PublicUrl = (key: string): string => {
     return '';
   }
 
+  if (ABSOLUTE_URL_PATTERN.test(normalizedKey) || normalizedKey.startsWith('data:')) {
+    return normalizedKey;
+  }
+
   if (R2_PUBLIC_URL) {
     return `${R2_PUBLIC_URL}/${normalizedKey}`;
   }
 
   const proxyPath = `/api/r2/object?key=${encodeURIComponent(normalizedKey)}`;
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return `${window.location.origin}${proxyPath}`;
+  }
+  return proxyPath;
+};
+
+export const getPhotoDeliveryUrl = (key: string): string => {
+  const normalizedKey = normalizeKey(key);
+  if (!normalizedKey) {
+    return '';
+  }
+
+  if (ABSOLUTE_URL_PATTERN.test(normalizedKey) || normalizedKey.startsWith('data:')) {
+    return normalizedKey;
+  }
+
+  const params = new URLSearchParams({
+    key: normalizedKey,
+    fallback: 'supabase'
+  });
+  if (SUPABASE_PUBLIC_URL) {
+    params.set('supabase_url', SUPABASE_PUBLIC_URL);
+  }
+
+  const proxyPath = `/api/r2/object?${params.toString()}`;
   if (typeof window !== 'undefined' && window.location?.origin) {
     return `${window.location.origin}${proxyPath}`;
   }

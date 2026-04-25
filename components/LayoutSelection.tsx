@@ -40,6 +40,14 @@ const LayoutSelection: React.FC<Props> = ({ onSelect, onAdmin }) => {
             </div>
             <h2 className="text-2xl md:text-3xl font-serif text-amber-100 mb-2 md:mb-3">{LAYOUT_CONFIG.postcard.name}</h2>
             <p className="text-slate-400 mb-6 md:mb-8 font-light leading-relaxed text-sm md:text-base">{LAYOUT_CONFIG.postcard.description}</p>
+            <div className="mb-6 md:mb-8 flex flex-wrap items-center justify-center gap-2">
+              <span className="inline-flex items-center rounded-full border border-emerald-300/40 bg-emerald-400/10 px-3 py-1 text-[11px] md:text-xs uppercase tracking-widest text-emerald-100">
+                Portrait is recommended
+              </span>
+              <span className="inline-flex items-center rounded-full border border-amber-300/40 bg-amber-300/10 px-3 py-1 text-[11px] md:text-xs uppercase tracking-widest text-amber-100">
+                New video boomerang
+              </span>
+            </div>
             
             {/* Visual Preview Abstract */}
             <div className="w-24 md:w-32 aspect-[2/3] border border-amber-200/20 p-2 flex flex-col gap-2 opacity-60 group-hover:opacity-100 transition-all">

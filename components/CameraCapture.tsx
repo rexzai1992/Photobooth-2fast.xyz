@@ -15,6 +15,10 @@ const SHOT_RECORD_POST_CAPTURE_MS = 350;
 const DEFAULT_VIDEO_MIME = 'video/webm';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const getIdleStatusText = (layout: LayoutType) =>
+  layout === 'postcard'
+    ? 'Tap the camera to begin your session. Video is recording too.'
+    : 'Tap the camera to begin your session.';
 
 const blobToDataUrl = (blob: Blob): Promise<string | null> => {
   return new Promise(resolve => {
@@ -65,7 +69,7 @@ const CameraCapture: React.FC<Props> = ({ layout, onComplete }) => {
   const [isRecordingVideo, setIsRecordingVideo] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [error, setError] = useState('');
-  const [statusText, setStatusText] = useState('Tap the camera to begin your session.');
+  const [statusText, setStatusText] = useState(getIdleStatusText(layout));
 
   const targetCount = LAYOUT_CONFIG[layout].photoCount;
   const targetAspect = layout === 'postcard' ? 16 / 9 : 4 / 3;
@@ -286,7 +290,7 @@ const CameraCapture: React.FC<Props> = ({ layout, onComplete }) => {
     } catch (err) {
       console.error('Capture sequence failed:', err);
       setError('Capture failed. Please retake your session.');
-      setStatusText('Tap the camera to begin your session.');
+      setStatusText(getIdleStatusText(layout));
     } finally {
       isCapturingRef.current = false;
       setIsSessionRunning(false);
@@ -360,7 +364,12 @@ const CameraCapture: React.FC<Props> = ({ layout, onComplete }) => {
               </div>
             )}
 
-            <div className="flex justify-center pb-2 md:pb-4">
+            <div className="flex flex-col items-center gap-3 pb-2 md:pb-4">
+              {!isSessionRunning && capturedPhotos.length === 0 && layout === 'postcard' && (
+                <div className="pointer-events-none rounded-full bg-amber-300/15 border border-amber-200/35 px-4 py-2 text-[11px] md:text-xs uppercase tracking-[0.16em] text-amber-100 font-serif shadow-[0_0_16px_rgba(251,191,36,0.18)]">
+                  Video is recording too
+                </div>
+              )}
               {!isSessionRunning && capturedPhotos.length === 0 && (
                 <button
                   onClick={runCaptureSequence}

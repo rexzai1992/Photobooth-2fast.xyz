@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { savePhotoToGallery, updatePhotoPhoneNumber } from '../utils/storage';
 import { Download, Phone, CheckCircle, ArrowLeft, Video } from 'lucide-react';
 import { supabase } from '../utils/supabase';
-import { getR2PublicUrl } from '../utils/r2Storage';
+import { getPhotoDeliveryUrl } from '../utils/r2Storage';
 
 const UUID_PATTERN =
   /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
@@ -12,6 +12,8 @@ const LOOKUP_RETRY_DELAY_MS = 600;
 const TOKEN_TTL_MS = 10 * 60 * 1000;
 const TOKEN_EXPIRED_MESSAGE = 'This download link expired after 10 minutes. Please scan a new QR code.';
 const MAX_PHONE_INPUT_LENGTH = 20;
+const PREVIEW_VIDEO_REPLAY_COUNT = 1;
+const PREVIEW_VIDEO_EXTENSION = 'webm';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -98,6 +100,15 @@ const numberPadRows = [
   ['+', '0', '⌫']
 ];
 
+const getFileExtensionFromMimeType = (mimeType: string): string => {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes('png')) return 'png';
+  if (normalized.includes('webp')) return 'webp';
+  if (normalized.includes('gif')) return 'gif';
+  if (normalized.includes('jpeg') || normalized.includes('jpg')) return 'jpg';
+  return 'jpg';
+};
+
 const PhotoDownload: React.FC = () => {
   const { token } = useParams<{ token: string }>();
   const navigate = useNavigate();
@@ -110,6 +121,7 @@ const PhotoDownload: React.FC = () => {
   const [isSaved, setIsSaved] = useState(false);
   const [error, setError] = useState('');
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
+  const previewVideoReplayCountRef = useRef(0);
 
   const handleNumberPadInput = (value: string) => {
     setPhoneNumber(prev => {
@@ -183,6 +195,7 @@ const PhotoDownload: React.FC = () => {
     const loadPhoto = async () => {
       setIsSaved(false);
       setError('');
+      setCaptureVideoUrl(null);
 
       const normalizedToken = normalizeToken(token);
       const tokenCandidates = extractTokenCandidates(normalizedToken);
@@ -190,8 +203,15 @@ const PhotoDownload: React.FC = () => {
       const previewPathHint = searchParams.get('preview')?.trim() || '';
       const fullPathHint = searchParams.get('full')?.trim() || '';
       const videoPathHint = searchParams.get('video')?.trim() || '';
+      const videoFlag = (searchParams.get('v') || '').trim().toLowerCase();
+      const hasVideoFlag = videoFlag === '1' || videoFlag === 'true' || videoFlag === 'yes';
       const expiryFromQuery = parseExpiresAtValue(searchParams.get('exp'));
-      const hintedPath = previewPathHint || fullPathHint;
+      const primaryToken = tokenCandidates[0] || null;
+      const inferredPreviewPath = primaryToken ? `photos/${primaryToken}-preview.jpg` : '';
+      const inferredFullPath = primaryToken ? `photos/${primaryToken}-full.jpg` : '';
+      const inferredVideoPath = primaryToken ? `photos/${primaryToken}-preview-video.${PREVIEW_VIDEO_EXTENSION}` : '';
+      const hintedPath = previewPathHint || fullPathHint || inferredPreviewPath || inferredFullPath;
+      const resolvedVideoPathHint = videoPathHint || (hasVideoFlag ? inferredVideoPath : '');
       setExpiresAt(expiryFromQuery);
 
       if (isExpired(expiryFromQuery)) {
@@ -201,8 +221,8 @@ const PhotoDownload: React.FC = () => {
         return;
       }
 
-      if (videoPathHint && !isCancelled) {
-        setCaptureVideoUrl(getR2PublicUrl(videoPathHint));
+      if (resolvedVideoPathHint && !isCancelled) {
+        setCaptureVideoUrl(getPhotoDeliveryUrl(resolvedVideoPathHint));
       }
 
       // 1) Fast path for same-browser flow (legacy/session behavior).
@@ -240,11 +260,13 @@ const PhotoDownload: React.FC = () => {
           if (!isCancelled) {
             setPhotoDataUrl(typeof parsed?.dataUrl === 'string' ? parsed.dataUrl : null);
             setPhotoId(typeof parsed?.photoId === 'string' ? parsed.photoId : tokenCandidates[0] || normalizedToken || sessionToken);
-            if (typeof parsed?.captureVideo === 'string') {
-              setCaptureVideoUrl(parsed.captureVideo);
+            if (typeof parsed?.captureVideoPath === 'string' && parsed.captureVideoPath.trim()) {
+              setCaptureVideoUrl(getPhotoDeliveryUrl(parsed.captureVideoPath));
+            } else if (typeof parsed?.captureVideo === 'string') {
+              setCaptureVideoUrl(getPhotoDeliveryUrl(parsed.captureVideo));
             } else if (Array.isArray(parsed?.captureVideos)) {
               const firstVideo = parsed.captureVideos.find((item: unknown) => typeof item === 'string');
-              setCaptureVideoUrl(typeof firstVideo === 'string' ? firstVideo : null);
+              setCaptureVideoUrl(typeof firstVideo === 'string' ? getPhotoDeliveryUrl(firstVideo) : null);
             }
             if (alreadySavedOnce) {
               setIsSaved(true);
@@ -268,13 +290,13 @@ const PhotoDownload: React.FC = () => {
         }
       }
 
-      // 2) R2-first path for cross-device flows when QR includes object hints.
+      // 2) R2-first path for cross-device flows with inferred or explicit object hints.
       if (hintedPath) {
-        setPhotoDataUrl(getR2PublicUrl(hintedPath));
+        setPhotoDataUrl(getPhotoDeliveryUrl(hintedPath));
         setPhotoId(tokenCandidates[0] || null);
       }
 
-      // 2) Cross-device: read persisted record by token (retry to absorb replication delays).
+      // 3) Cross-device: read persisted record by token (retry to absorb replication delays).
       let data: {
         id: string;
         storage_path?: string | null;
@@ -338,7 +360,7 @@ const PhotoDownload: React.FC = () => {
 
         const path = data.preview_path || data.storage_path;
         if (path) {
-          setPhotoDataUrl(getR2PublicUrl(path));
+          setPhotoDataUrl(getPhotoDeliveryUrl(path));
           setPhotoId(data.id);
           return;
         }
@@ -350,7 +372,7 @@ const PhotoDownload: React.FC = () => {
         }
       }
 
-      // 3) Fallback from URL hint if record lookup is delayed/unavailable.
+      // 4) Fallback from inferred/URL hint if record lookup is delayed/unavailable.
       if (hintedPath) {
         return;
       }
@@ -367,6 +389,10 @@ const PhotoDownload: React.FC = () => {
       isCancelled = true;
     };
   }, [token, location.search]);
+
+  useEffect(() => {
+    previewVideoReplayCountRef.current = 0;
+  }, [captureVideoUrl]);
 
   const handlePhoneSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -416,15 +442,40 @@ const PhotoDownload: React.FC = () => {
     }
   };
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     if (!photoDataUrl) return;
 
-    const link = document.createElement('a');
-    link.href = photoDataUrl;
-    link.download = `deep-blue-photobooth-${Date.now()}.jpg`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    try {
+      if (photoDataUrl.startsWith('data:')) {
+        const mimeType = photoDataUrl.match(/^data:(.*?);base64,/)?.[1] || 'image/jpeg';
+        const extension = getFileExtensionFromMimeType(mimeType);
+        const link = document.createElement('a');
+        link.href = photoDataUrl;
+        link.download = `deep-blue-photobooth-${Date.now()}.${extension}`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        return;
+      }
+
+      const response = await fetch(photoDataUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to download photo (${response.status})`);
+      }
+      const blob = await response.blob();
+      const extension = getFileExtensionFromMimeType(blob.type || 'image/jpeg');
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = `deep-blue-photobooth-${Date.now()}.${extension}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(objectUrl);
+    } catch (downloadError) {
+      console.error('Photo download failed:', downloadError);
+      setError('Failed to download photo. Please try again.');
+    }
   };
 
   const handleVideoDownload = () => {
@@ -467,7 +518,9 @@ const PhotoDownload: React.FC = () => {
           </div>
           <h2 className="text-2xl font-serif text-white mb-2">Photo Saved!</h2>
           <p className="text-slate-300 mb-6">
-            Your photo has been saved successfully. You can now download it.
+            {captureVideoUrl
+              ? 'Your photo has been saved successfully. You can now download the photo and video.'
+              : 'Your photo has been saved successfully. You can now download it.'}
           </p>
 
           <div className="mb-6">
@@ -483,8 +536,22 @@ const PhotoDownload: React.FC = () => {
               <p className="text-amber-100 text-sm font-serif mb-2">Preview Video</p>
               <video
                 src={captureVideoUrl}
+                autoPlay
                 controls
+                muted
                 playsInline
+                onEnded={(event) => {
+                  if (previewVideoReplayCountRef.current >= PREVIEW_VIDEO_REPLAY_COUNT) {
+                    return;
+                  }
+                  previewVideoReplayCountRef.current += 1;
+                  const video = event.currentTarget;
+                  video.currentTime = 0;
+                  void video.play().catch(() => undefined);
+                }}
+                onError={() => {
+                  setCaptureVideoUrl(null);
+                }}
                 className="w-full max-w-sm mx-auto rounded-lg shadow-lg border border-amber-200/20"
               />
             </div>
