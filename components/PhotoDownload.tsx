@@ -14,6 +14,9 @@ const TOKEN_EXPIRED_MESSAGE = 'This download link expired after 10 minutes. Plea
 const MAX_PHONE_INPUT_LENGTH = 20;
 const PREVIEW_VIDEO_REPLAY_COUNT = 1;
 const PREVIEW_VIDEO_EXTENSION = 'webm';
+const PREVIEW_VIDEO_BASE_DURATION_SECONDS = 3;
+const PREVIEW_VIDEO_DURATION_TOLERANCE_SECONDS = 0.6;
+const SUPPORTED_VIDEO_EXTENSIONS = new Set(['webm', 'mp4', 'mov', 'ogv']);
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -109,12 +112,35 @@ const getFileExtensionFromMimeType = (mimeType: string): string => {
   return 'jpg';
 };
 
+const getVideoFileExtensionFromMimeType = (mimeType: string): string => {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes('webm')) return 'webm';
+  if (normalized.includes('mp4')) return 'mp4';
+  if (normalized.includes('quicktime')) return 'mov';
+  if (normalized.includes('ogg')) return 'ogv';
+  return PREVIEW_VIDEO_EXTENSION;
+};
+
+const deriveFullPhotoPath = (path: string | null | undefined): string | null => {
+  if (typeof path !== 'string') {
+    return null;
+  }
+
+  const trimmedPath = path.trim();
+  if (!trimmedPath) {
+    return null;
+  }
+
+  return trimmedPath.replace(/-preview(\.[a-z0-9]+)$/i, '-full$1');
+};
+
 const PhotoDownload: React.FC = () => {
   const { token } = useParams<{ token: string }>();
   const navigate = useNavigate();
   const location = useLocation();
   const [phoneNumber, setPhoneNumber] = useState('');
   const [photoDataUrl, setPhotoDataUrl] = useState<string | null>(null);
+  const [fullPhotoUrl, setFullPhotoUrl] = useState<string | null>(null);
   const [captureVideoUrl, setCaptureVideoUrl] = useState<string | null>(null);
   const [photoId, setPhotoId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -150,6 +176,7 @@ const PhotoDownload: React.FC = () => {
 
   const showExpiredState = () => {
     setPhotoDataUrl(null);
+    setFullPhotoUrl(null);
     setCaptureVideoUrl(null);
     setPhotoId(null);
     setError(TOKEN_EXPIRED_MESSAGE);
@@ -195,6 +222,7 @@ const PhotoDownload: React.FC = () => {
     const loadPhoto = async () => {
       setIsSaved(false);
       setError('');
+      setFullPhotoUrl(null);
       setCaptureVideoUrl(null);
 
       const normalizedToken = normalizeToken(token);
@@ -203,13 +231,16 @@ const PhotoDownload: React.FC = () => {
       const previewPathHint = searchParams.get('preview')?.trim() || '';
       const fullPathHint = searchParams.get('full')?.trim() || '';
       const videoPathHint = searchParams.get('video')?.trim() || '';
+      const videoExtensionHint = (searchParams.get('ve') || '').trim().toLowerCase();
       const videoFlag = (searchParams.get('v') || '').trim().toLowerCase();
       const hasVideoFlag = videoFlag === '1' || videoFlag === 'true' || videoFlag === 'yes';
+      const inferredVideoExtension =
+        SUPPORTED_VIDEO_EXTENSIONS.has(videoExtensionHint) ? videoExtensionHint : PREVIEW_VIDEO_EXTENSION;
       const expiryFromQuery = parseExpiresAtValue(searchParams.get('exp'));
       const primaryToken = tokenCandidates[0] || null;
       const inferredPreviewPath = primaryToken ? `photos/${primaryToken}-preview.jpg` : '';
       const inferredFullPath = primaryToken ? `photos/${primaryToken}-full.jpg` : '';
-      const inferredVideoPath = primaryToken ? `photos/${primaryToken}-preview-video.${PREVIEW_VIDEO_EXTENSION}` : '';
+      const inferredVideoPath = primaryToken ? `photos/${primaryToken}-preview-video.${inferredVideoExtension}` : '';
       const hintedPath = previewPathHint || fullPathHint || inferredPreviewPath || inferredFullPath;
       const resolvedVideoPathHint = videoPathHint || (hasVideoFlag ? inferredVideoPath : '');
       setExpiresAt(expiryFromQuery);
@@ -249,6 +280,7 @@ const PhotoDownload: React.FC = () => {
           if (typeof parsed === 'string') {
             if (!isCancelled) {
               setPhotoDataUrl(parsed);
+              setFullPhotoUrl(parsed);
               setPhotoId(tokenCandidates[0] || normalizedToken || sessionToken);
               if (alreadySavedOnce) {
                 setIsSaved(true);
@@ -259,6 +291,7 @@ const PhotoDownload: React.FC = () => {
 
           if (!isCancelled) {
             setPhotoDataUrl(typeof parsed?.dataUrl === 'string' ? parsed.dataUrl : null);
+            setFullPhotoUrl(typeof parsed?.dataUrl === 'string' ? parsed.dataUrl : null);
             setPhotoId(typeof parsed?.photoId === 'string' ? parsed.photoId : tokenCandidates[0] || normalizedToken || sessionToken);
             if (typeof parsed?.captureVideoPath === 'string' && parsed.captureVideoPath.trim()) {
               setCaptureVideoUrl(getPhotoDeliveryUrl(parsed.captureVideoPath));
@@ -281,6 +314,7 @@ const PhotoDownload: React.FC = () => {
 
           if (!isCancelled) {
             setPhotoDataUrl(storedData);
+            setFullPhotoUrl(storedData);
             setPhotoId(tokenCandidates[0] || normalizedToken || sessionToken);
             if (alreadySavedOnce) {
               setIsSaved(true);
@@ -293,6 +327,10 @@ const PhotoDownload: React.FC = () => {
       // 2) R2-first path for cross-device flows with inferred or explicit object hints.
       if (hintedPath) {
         setPhotoDataUrl(getPhotoDeliveryUrl(hintedPath));
+        const hintedFullPath = fullPathHint || deriveFullPhotoPath(hintedPath) || inferredFullPath;
+        if (hintedFullPath) {
+          setFullPhotoUrl(getPhotoDeliveryUrl(hintedFullPath));
+        }
         setPhotoId(tokenCandidates[0] || null);
       }
 
@@ -359,6 +397,10 @@ const PhotoDownload: React.FC = () => {
         }
 
         const path = data.preview_path || data.storage_path;
+        const fullPath = data.storage_path || deriveFullPhotoPath(data.preview_path) || inferredFullPath;
+        if (fullPath) {
+          setFullPhotoUrl(getPhotoDeliveryUrl(fullPath));
+        }
         if (path) {
           setPhotoDataUrl(getPhotoDeliveryUrl(path));
           setPhotoId(data.id);
@@ -367,6 +409,7 @@ const PhotoDownload: React.FC = () => {
 
         if (typeof data.image_data === 'string' && data.image_data) {
           setPhotoDataUrl(data.image_data);
+          setFullPhotoUrl(data.image_data);
           setPhotoId(data.id);
           return;
         }
@@ -443,14 +486,15 @@ const PhotoDownload: React.FC = () => {
   };
 
   const handleDownload = async () => {
-    if (!photoDataUrl) return;
+    const preferredPhotoUrl = fullPhotoUrl || photoDataUrl;
+    if (!preferredPhotoUrl) return;
 
-    try {
-      if (photoDataUrl.startsWith('data:')) {
-        const mimeType = photoDataUrl.match(/^data:(.*?);base64,/)?.[1] || 'image/jpeg';
+    const downloadFromSource = async (sourceUrl: string) => {
+      if (sourceUrl.startsWith('data:')) {
+        const mimeType = sourceUrl.match(/^data:(.*?);base64,/)?.[1] || 'image/jpeg';
         const extension = getFileExtensionFromMimeType(mimeType);
         const link = document.createElement('a');
-        link.href = photoDataUrl;
+        link.href = sourceUrl;
         link.download = `deep-blue-photobooth-${Date.now()}.${extension}`;
         document.body.appendChild(link);
         link.click();
@@ -458,7 +502,7 @@ const PhotoDownload: React.FC = () => {
         return;
       }
 
-      const response = await fetch(photoDataUrl);
+      const response = await fetch(sourceUrl);
       if (!response.ok) {
         throw new Error(`Failed to download photo (${response.status})`);
       }
@@ -472,21 +516,58 @@ const PhotoDownload: React.FC = () => {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(objectUrl);
+    };
+
+    try {
+      await downloadFromSource(preferredPhotoUrl);
     } catch (downloadError) {
+      if (preferredPhotoUrl !== photoDataUrl && photoDataUrl) {
+        try {
+          await downloadFromSource(photoDataUrl);
+          return;
+        } catch (fallbackError) {
+          console.error('Photo download fallback failed:', fallbackError);
+        }
+      }
       console.error('Photo download failed:', downloadError);
       setError('Failed to download photo. Please try again.');
     }
   };
 
-  const handleVideoDownload = () => {
+  const handleVideoDownload = async () => {
     if (!captureVideoUrl) return;
 
-    const link = document.createElement('a');
-    link.href = captureVideoUrl;
-    link.download = `deep-blue-preview-video-${Date.now()}.webm`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    try {
+      if (captureVideoUrl.startsWith('data:')) {
+        const mimeType = captureVideoUrl.match(/^data:(.*?);base64,/)?.[1] || `video/${PREVIEW_VIDEO_EXTENSION}`;
+        const extension = getVideoFileExtensionFromMimeType(mimeType);
+        const link = document.createElement('a');
+        link.href = captureVideoUrl;
+        link.download = `deep-blue-preview-video-${Date.now()}.${extension}`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        return;
+      }
+
+      const response = await fetch(captureVideoUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to download video (${response.status})`);
+      }
+      const blob = await response.blob();
+      const extension = getVideoFileExtensionFromMimeType(blob.type || `video/${PREVIEW_VIDEO_EXTENSION}`);
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = `deep-blue-preview-video-${Date.now()}.${extension}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(objectUrl);
+    } catch (downloadError) {
+      console.error('Video download failed:', downloadError);
+      setError('Failed to download video. Please try again.');
+    }
   };
 
   if (error && !photoDataUrl) {
@@ -541,11 +622,20 @@ const PhotoDownload: React.FC = () => {
                 muted
                 playsInline
                 onEnded={(event) => {
+                  const video = event.currentTarget;
+                  const duration = Number.isFinite(video.duration) && video.duration > 0
+                    ? video.duration
+                    : 0;
+                  const shouldReplayForDuration =
+                    duration === 0 ||
+                    duration <= PREVIEW_VIDEO_BASE_DURATION_SECONDS + PREVIEW_VIDEO_DURATION_TOLERANCE_SECONDS;
+                  if (!shouldReplayForDuration) {
+                    return;
+                  }
                   if (previewVideoReplayCountRef.current >= PREVIEW_VIDEO_REPLAY_COUNT) {
                     return;
                   }
                   previewVideoReplayCountRef.current += 1;
-                  const video = event.currentTarget;
                   video.currentTime = 0;
                   void video.play().catch(() => undefined);
                 }}

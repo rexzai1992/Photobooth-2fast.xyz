@@ -65,5 +65,6 @@ Optional function variable:
 - Build command: `npm run build`
 - Output directory: `dist`
 - Functions directory: `functions`
+- Detailed production deploy reference: `docs/deployment-photobooth-izzul.md`
 
 The app uses SPA routing, so ensure `/* -> /index.html` fallback is enabled in your host config.

@@ -1,5 +1,5 @@
-import React, { useState, useRef, useCallback } from 'react';
-import { BrowserRouter, Routes, Route, useNavigate } from 'react-router-dom';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { BrowserRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import { AppState, LayoutType } from './types';
 import LayoutSelection from './components/LayoutSelection';
 import CameraCapture from './components/CameraCapture';
@@ -7,6 +7,209 @@ import PhotoReview from './components/PhotoReview';
 import PhotoEditor from './components/PhotoEditor';
 import AdminDashboard from './components/AdminDashboard';
 import PhotoDownload from './components/PhotoDownload';
+
+interface WakeLockSentinelLike {
+  released: boolean;
+  release: () => Promise<void>;
+}
+
+const KioskModeGuard: React.FC = () => {
+  const location = useLocation();
+  const isAdminRoute = location.pathname.startsWith('/admin');
+  const shouldForceKiosk = !isAdminRoute;
+  const [showFullscreenPrompt, setShowFullscreenPrompt] = useState(false);
+  const wakeLockRef = useRef<WakeLockSentinelLike | null>(null);
+
+  const enterFullscreen = useCallback(async () => {
+    if (!shouldForceKiosk) {
+      return true;
+    }
+
+    if (document.fullscreenElement) {
+      setShowFullscreenPrompt(false);
+      return true;
+    }
+
+    if (!document.documentElement.requestFullscreen) {
+      setShowFullscreenPrompt(false);
+      return true;
+    }
+
+    try {
+      await document.documentElement.requestFullscreen();
+      setShowFullscreenPrompt(false);
+      return true;
+    } catch (error) {
+      console.log('Kiosk fullscreen request was blocked until user interaction.', error);
+      setShowFullscreenPrompt(true);
+      return false;
+    }
+  }, [shouldForceKiosk]);
+
+  const exitFullscreen = useCallback(async () => {
+    if (!document.fullscreenElement || !document.exitFullscreen) {
+      return;
+    }
+
+    try {
+      await document.exitFullscreen();
+    } catch (error) {
+      console.log('Exit fullscreen failed on admin route.', error);
+    }
+  }, []);
+
+  const requestWakeLock = useCallback(async () => {
+    if (!shouldForceKiosk || wakeLockRef.current) {
+      return;
+    }
+
+    const navigatorWithWakeLock = navigator as Navigator & {
+      wakeLock?: {
+        request: (type: 'screen') => Promise<WakeLockSentinelLike>;
+      };
+    };
+
+    if (!navigatorWithWakeLock.wakeLock) {
+      return;
+    }
+
+    try {
+      wakeLockRef.current = await navigatorWithWakeLock.wakeLock.request('screen');
+    } catch (error) {
+      console.log('Wake lock request failed.', error);
+    }
+  }, [shouldForceKiosk]);
+
+  const releaseWakeLock = useCallback(async () => {
+    if (!wakeLockRef.current) {
+      return;
+    }
+
+    try {
+      await wakeLockRef.current.release();
+    } catch (error) {
+      console.log('Wake lock release failed.', error);
+    } finally {
+      wakeLockRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    const previousUserSelect = document.body.style.userSelect;
+    const previousTouchAction = document.body.style.touchAction;
+    const previousOverscroll = document.body.style.overscrollBehavior;
+
+    if (shouldForceKiosk) {
+      document.body.style.userSelect = 'none';
+      document.body.style.touchAction = 'manipulation';
+      document.body.style.overscrollBehavior = 'none';
+    }
+
+    return () => {
+      document.body.style.userSelect = previousUserSelect;
+      document.body.style.touchAction = previousTouchAction;
+      document.body.style.overscrollBehavior = previousOverscroll;
+    };
+  }, [shouldForceKiosk]);
+
+  useEffect(() => {
+    if (!shouldForceKiosk) {
+      setShowFullscreenPrompt(false);
+      void releaseWakeLock();
+      void exitFullscreen();
+      return;
+    }
+
+    void enterFullscreen();
+    void requestWakeLock();
+
+    const handleFullscreenChange = () => {
+      const isFullscreen = Boolean(document.fullscreenElement);
+      setShowFullscreenPrompt(!isFullscreen);
+      if (isFullscreen) {
+        void requestWakeLock();
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void enterFullscreen();
+        void requestWakeLock();
+      } else {
+        void releaseWakeLock();
+      }
+    };
+
+    const handleUserInteraction = () => {
+      if (!document.fullscreenElement) {
+        void enterFullscreen();
+      }
+    };
+
+    const handleContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      const ctrlLike = event.ctrlKey || event.metaKey;
+
+      const blockedShortcut =
+        (ctrlLike && ['l', 'n', 'r', 't', 'w'].includes(key)) ||
+        key === 'f5' ||
+        key === 'escape' ||
+        (event.altKey && (key === 'arrowleft' || key === 'arrowright'));
+
+      if (!blockedShortcut) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (!document.fullscreenElement) {
+        void enterFullscreen();
+      }
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pointerdown', handleUserInteraction, { capture: true });
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    window.addEventListener('contextmenu', handleContextMenu);
+
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pointerdown', handleUserInteraction, { capture: true });
+      window.removeEventListener('keydown', handleKeyDown, { capture: true });
+      window.removeEventListener('contextmenu', handleContextMenu);
+    };
+  }, [shouldForceKiosk, enterFullscreen, exitFullscreen, requestWakeLock, releaseWakeLock]);
+
+  if (!shouldForceKiosk || !showFullscreenPrompt) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-[120] bg-slate-950/95 backdrop-blur-sm flex items-center justify-center p-6">
+      <div className="w-full max-w-md bg-slate-900 border border-amber-200/20 rounded-2xl p-6 text-center shadow-2xl">
+        <h2 className="text-2xl font-serif text-amber-100 mb-2">Kiosk Mode</h2>
+        <p className="text-slate-300 mb-6">
+          Tap below to continue in full screen. Admin page is excluded from kiosk lock.
+        </p>
+        <button
+          onClick={() => {
+            void enterFullscreen();
+          }}
+          className="w-full bg-amber-200 text-slate-900 font-bold py-3 rounded-lg hover:bg-white transition-colors"
+        >
+          Continue Full Screen
+        </button>
+      </div>
+    </div>
+  );
+};
 
 const PhotoboothApp: React.FC = () => {
   const navigate = useNavigate();
@@ -17,8 +220,6 @@ const PhotoboothApp: React.FC = () => {
     captureVideos: [],
     stickers: []
   });
-
-  const lastTapRef = useRef(0);
 
   const handleLayoutSelect = (layout: LayoutType) => {
     setState(prev => ({ ...prev, layout, step: 'capture' }));
@@ -72,36 +273,8 @@ const PhotoboothApp: React.FC = () => {
     ));
   };
 
-  // Improved Tap Logic using only Refs for immediate action
-  const handleCornerTapRef = useRef(0);
-  const handleCornerClickInstant = () => {
-    const now = Date.now();
-    if (now - lastTapRef.current < 400) {
-      handleCornerTapRef.current += 1;
-    } else {
-      handleCornerTapRef.current = 1;
-    }
-    lastTapRef.current = now;
-
-    if (handleCornerTapRef.current === 3) {
-      if (!document.fullscreenElement) {
-        document.documentElement.requestFullscreen().catch(e => console.log('Fullscreen blocked', e));
-      } else {
-        document.exitFullscreen().catch(e => console.log('Exit fullscreen error', e));
-      }
-      handleCornerTapRef.current = 0; // Reset
-    }
-  };
-
   return (
     <div className="w-full min-h-[100dvh] relative overflow-hidden bg-slate-950">
-      
-      {/* Triple Tap Trigger Zone (Top Right) */}
-      <div 
-        className="fixed top-0 right-0 w-20 h-20 z-[100] cursor-default active:bg-white/5 transition-colors"
-        onClick={handleCornerClickInstant}
-      />
-
       {state.step !== 'admin' && (
         <div className="absolute inset-0 pointer-events-none overflow-hidden">
            {/* Classic Light Rays */}
@@ -148,6 +321,7 @@ const PhotoboothApp: React.FC = () => {
 const App: React.FC = () => {
   return (
     <BrowserRouter>
+      <KioskModeGuard />
       <Routes>
         <Route path="/" element={<PhotoboothApp />} />
         <Route path="/admin" element={<AdminDashboard onBack={() => window.location.href = '/'} />} />

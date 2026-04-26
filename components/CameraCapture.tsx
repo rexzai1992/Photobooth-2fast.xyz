@@ -40,7 +40,10 @@ const getSupportedVideoMimeType = (): string => {
   const preferredMimeTypes = [
     'video/webm;codecs=vp9',
     'video/webm;codecs=vp8',
-    'video/webm'
+    'video/webm',
+    'video/mp4;codecs="avc1.42E01E,mp4a.40.2"',
+    'video/mp4;codecs="avc1.42E01E"',
+    'video/mp4'
   ];
 
   for (const type of preferredMimeTypes) {
@@ -334,7 +337,7 @@ const CameraCapture: React.FC<Props> = ({ layout, onComplete }) => {
               </div>
               <div className="flex flex-col items-end gap-2">
                 <div className="hidden md:block text-amber-200/80 text-sm font-serif italic tracking-wider">
-                  Deep Blue Studio
+                  Deep Blue Photobooth
                 </div>
                 {shouldRecordVideo && (
                   <div className={`px-3 py-1 rounded-full text-[11px] md:text-xs font-serif border flex items-center gap-1 ${

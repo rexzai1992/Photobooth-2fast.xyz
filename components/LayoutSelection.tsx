@@ -17,7 +17,7 @@ const LayoutSelection: React.FC<Props> = ({ onSelect, onAdmin }) => {
       <div className="text-center mt-8 mb-8 md:mb-16 animate-fade-in-up z-20 shrink-0">
         <h3 className="text-amber-200/60 uppercase tracking-[0.3em] text-xs md:text-sm mb-2 md:mb-4">Est. 2026</h3>
         <h1 className="text-4xl md:text-7xl font-serif font-medium mb-4 md:mb-6 text-transparent bg-clip-text bg-gradient-to-b from-amber-100 to-amber-400 drop-shadow-sm leading-tight">
-          Deep Blue
+          Deep Blue Photobooth
         </h1>
         <div className="h-px w-16 md:w-24 bg-gradient-to-r from-transparent via-amber-200/50 to-transparent mx-auto mb-4 md:mb-6"></div>
         <p className="text-base md:text-xl text-slate-400 font-light italic max-w-md mx-auto font-serif px-4">

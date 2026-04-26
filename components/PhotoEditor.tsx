@@ -45,17 +45,12 @@ const COMPOSITE_STICKER_BASE_WIDTH = COMPOSITE_VIDEO_WIDTH * 0.125;
 const COMPOSITE_FRAME_RATE = 30;
 const COMPOSITE_TIMESLICE = 200;
 const DOWNLOAD_TOKEN_TTL_MS = 10 * 60 * 1000;
-const PREVIEW_VIDEO_REPLAY_COUNT = 1;
+const PREVIEW_VIDEO_EXPORT_REPLAY_COUNT = 1;
+const PREVIEW_VIDEO_UI_REPLAY_COUNT = 0;
 const PREVIEW_VIDEO_DURATION_SECONDS = 3;
-
-const getReadableDownloadPath = (url: string): string => {
-  try {
-    const parsed = new URL(url);
-    return `${parsed.pathname}${parsed.search}`;
-  } catch {
-    return url;
-  }
-};
+const PREVIEW_VIDEO_EXPORT_DURATION_SECONDS =
+  PREVIEW_VIDEO_DURATION_SECONDS * (PREVIEW_VIDEO_EXPORT_REPLAY_COUNT + 1);
+const MIN_PREVIEW_VIDEO_DURATION_SECONDS = PREVIEW_VIDEO_EXPORT_DURATION_SECONDS - 0.4;
 
 const blobToDataUrl = (blob: Blob): Promise<string | null> => {
   return new Promise(resolve => {
@@ -109,26 +104,34 @@ const uploadVideoPreviewToR2 = async (photoToken: string, videoDataUrl: string):
   }
 };
 
-const getSupportedCompositeMimeType = (): string => {
-  if (typeof MediaRecorder === 'undefined') return 'video/webm';
+const getSupportedCompositeMimeTypes = (): string[] => {
+  if (typeof MediaRecorder === 'undefined') return ['video/webm'];
 
   const candidates = [
+    'video/mp4;codecs="avc1.42E01E,mp4a.40.2"',
+    'video/mp4;codecs="avc1.42E01E"',
+    'video/mp4',
     'video/webm;codecs=vp9',
     'video/webm;codecs=vp8',
     'video/webm'
   ];
 
+  const supported: string[] = [];
   for (const type of candidates) {
     try {
-      if (MediaRecorder.isTypeSupported(type)) {
-        return type;
+      if (MediaRecorder.isTypeSupported(type) && !supported.includes(type)) {
+        supported.push(type);
       }
     } catch {
       // Ignore support probe errors.
     }
   }
 
-  return 'video/webm';
+  if (supported.length === 0) {
+    supported.push('video/webm');
+  }
+
+  return supported;
 };
 
 const loadVideoElement = (src: string): Promise<HTMLVideoElement> => {
@@ -157,6 +160,33 @@ const loadVideoElement = (src: string): Promise<HTMLVideoElement> => {
     video.addEventListener('loadedmetadata', onLoaded, { once: true });
     video.addEventListener('error', onError, { once: true });
   });
+};
+
+const getVideoDurationFromSource = async (source: string): Promise<number | null> => {
+  const trimmedSource = typeof source === 'string' ? source.trim() : '';
+  if (!trimmedSource) {
+    return null;
+  }
+
+  try {
+    const video = await loadVideoElement(trimmedSource);
+    const duration = video.duration;
+    if (!Number.isFinite(duration) || duration <= 0) {
+      return null;
+    }
+    return duration;
+  } catch {
+    return null;
+  }
+};
+
+const hasExpectedBoomerangDuration = async (source: string | null): Promise<boolean> => {
+  if (!source) {
+    return false;
+  }
+
+  const duration = await getVideoDurationFromSource(source);
+  return duration !== null && duration >= MIN_PREVIEW_VIDEO_DURATION_SECONDS;
 };
 
 const loadImageElement = (src: string): Promise<HTMLImageElement> => {
@@ -274,7 +304,8 @@ const drawVideoCover = (
 const buildPostcardCompositeVideo = async (
   videoLayers: string[],
   stickers: Sticker[],
-  frameColor: string
+  frameColor: string,
+  mimeType: string
 ): Promise<string | null> => {
   if (typeof MediaRecorder === 'undefined' || videoLayers.length === 0) {
     return null;
@@ -313,11 +344,17 @@ const buildPostcardCompositeVideo = async (
   }
 
   const stream = canvas.captureStream(COMPOSITE_FRAME_RATE);
-  const mimeType = getSupportedCompositeMimeType();
-  const recorder = new MediaRecorder(stream, {
-    mimeType,
-    videoBitsPerSecond: 2_500_000
-  });
+  let recorder: MediaRecorder;
+  try {
+    recorder = new MediaRecorder(stream, {
+      mimeType,
+      videoBitsPerSecond: 2_500_000
+    });
+  } catch (error) {
+    stream.getTracks().forEach(track => track.stop());
+    console.warn('Unable to initialize postcard preview video recorder.', error);
+    return null;
+  }
   const chunks: Blob[] = [];
 
   recorder.ondataavailable = event => {
@@ -398,7 +435,7 @@ const buildPostcardCompositeVideo = async (
       });
       drawFrame();
       const elapsed = (performance.now() - start) / 1000;
-      if (elapsed >= PREVIEW_VIDEO_DURATION_SECONDS) {
+      if (elapsed >= PREVIEW_VIDEO_EXPORT_DURATION_SECONDS) {
         resolve();
         return;
       }
@@ -418,12 +455,13 @@ const buildPostcardCompositeVideo = async (
   if (recorder.state !== 'inactive') {
     recorder.stop();
   }
+  stream.getTracks().forEach(track => track.stop());
 
   const blob = await stopped;
   return blobToDataUrl(blob);
 };
 
-const buildMirroredSingleVideo = async (videoSource: string): Promise<string | null> => {
+const buildMirroredSingleVideo = async (videoSource: string, mimeType: string): Promise<string | null> => {
   if (typeof MediaRecorder === 'undefined') {
     return null;
   }
@@ -453,7 +491,6 @@ const buildMirroredSingleVideo = async (videoSource: string): Promise<string | n
   }
 
   const stream = canvas.captureStream(COMPOSITE_FRAME_RATE);
-  const mimeType = getSupportedCompositeMimeType();
   let recorder: MediaRecorder;
   try {
     recorder = new MediaRecorder(stream, {
@@ -502,7 +539,7 @@ const buildMirroredSingleVideo = async (videoSource: string): Promise<string | n
       }
       drawFrame();
       const elapsed = (performance.now() - start) / 1000;
-      if (elapsed >= PREVIEW_VIDEO_DURATION_SECONDS) {
+      if (elapsed >= PREVIEW_VIDEO_EXPORT_DURATION_SECONDS) {
         resolve();
         return;
       }
@@ -525,6 +562,44 @@ const buildMirroredSingleVideo = async (videoSource: string): Promise<string | n
   return blobToDataUrl(blob);
 };
 
+const buildPostcardCompositeVideoWithFallback = async (
+  videoLayers: string[],
+  stickers: Sticker[],
+  frameColor: string
+): Promise<string | null> => {
+  for (const mimeType of getSupportedCompositeMimeTypes()) {
+    const exportedVideo = await buildPostcardCompositeVideo(videoLayers, stickers, frameColor, mimeType);
+    if (!exportedVideo) {
+      continue;
+    }
+
+    if (await hasExpectedBoomerangDuration(exportedVideo)) {
+      return exportedVideo;
+    }
+
+    console.warn(`Discarding postcard preview export with short duration using ${mimeType}.`);
+  }
+
+  return null;
+};
+
+const buildMirroredSingleVideoWithFallback = async (videoSource: string): Promise<string | null> => {
+  for (const mimeType of getSupportedCompositeMimeTypes()) {
+    const exportedVideo = await buildMirroredSingleVideo(videoSource, mimeType);
+    if (!exportedVideo) {
+      continue;
+    }
+
+    if (await hasExpectedBoomerangDuration(exportedVideo)) {
+      return exportedVideo;
+    }
+
+    console.warn(`Discarding mirrored preview export with short duration using ${mimeType}.`);
+  }
+
+  return null;
+};
+
 const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart }) => {
   const [frameColor, setFrameColor] = useState<string>('#ffffff');
   const [isExporting, setIsExporting] = useState(false);
@@ -541,12 +616,15 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
   const [showQrCode, setShowQrCode] = useState(false);
   const [showVideoPreview, setShowVideoPreview] = useState(false);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const [previewScale, setPreviewScale] = useState<number>(55);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const previewVideoRefs = useRef<(HTMLVideoElement | null)[]>([]);
   const confirmationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const confirmationCountdownRef = useRef<NodeJS.Timeout | null>(null);
   const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isExportInFlightRef = useRef(false);
+  const hasSavedToCloudRef = useRef(false);
   const draggingRef = useRef<{
     id: string;
     mode: 'move' | 'transform';
@@ -742,7 +820,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
     const replayCountRaw = Number(video.dataset.previewReplayCount ?? '0');
     const replayCount = Number.isFinite(replayCountRaw) ? replayCountRaw : 0;
 
-    if (replayCount < PREVIEW_VIDEO_REPLAY_COUNT) {
+    if (replayCount < PREVIEW_VIDEO_UI_REPLAY_COUNT) {
       video.dataset.previewReplayCount = String(replayCount + 1);
       video.currentTime = 0;
       void video.play().catch(() => {
@@ -781,14 +859,27 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
   };
 
   const handleExport = async () => {
+    if (isExportInFlightRef.current) {
+      return;
+    }
+
+    if (hasSavedToCloudRef.current) {
+      if (qrCodeUrl) {
+        setShowQrCode(true);
+      }
+      return;
+    }
+
+    isExportInFlightRef.current = true;
     setIsExporting(true);
-    resetAutoSaveTimeout(); // Reset auto-save timer on manual save
+    clearAutoSaveTimeout();
     try {
       const dataUrl = await generateComposite(layout, photos, stickers, frameColor);
       setPendingPhotoDataUrl(dataUrl);
 
       // Save the photo to the gallery and get the photo ID
       const photoId = await savePhotoToGallery(dataUrl);
+      hasSavedToCloudRef.current = true;
       console.log('Photo saved successfully with ID:', photoId);
 
       // Use persisted photo ID as download token so links work on any device.
@@ -805,7 +896,11 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
       let usedComposedVideo = false;
       if (layout === 'postcard' && captureVideos.length > 0) {
         try {
-          const composedPreviewVideo = await buildPostcardCompositeVideo(captureVideos, stickers, frameColor);
+          const composedPreviewVideo = await buildPostcardCompositeVideoWithFallback(
+            captureVideos,
+            stickers,
+            frameColor
+          );
           if (composedPreviewVideo) {
             selectedVideoForDownload = composedPreviewVideo;
             usedComposedVideo = true;
@@ -817,7 +912,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
 
       if (selectedVideoForDownload && !usedComposedVideo) {
         try {
-          const mirroredPreviewVideo = await buildMirroredSingleVideo(selectedVideoForDownload);
+          const mirroredPreviewVideo = await buildMirroredSingleVideoWithFallback(selectedVideoForDownload);
           if (mirroredPreviewVideo) {
             selectedVideoForDownload = mirroredPreviewVideo;
           }
@@ -826,12 +921,21 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
         }
       }
 
+      if (selectedVideoForDownload && !(await hasExpectedBoomerangDuration(selectedVideoForDownload))) {
+        console.warn('Preview video is shorter than expected 6s boomerang target; skipping video upload.');
+        selectedVideoForDownload = null;
+      }
+
       const expectedVideoPath = selectedVideoForDownload
         ? await uploadVideoPreviewToR2(photoToken, selectedVideoForDownload)
         : null;
       const downloadParams = new URLSearchParams();
       if (expectedVideoPath) {
         downloadParams.set('v', '1');
+        const videoExtension = expectedVideoPath.split('.').pop()?.toLowerCase();
+        if (videoExtension) {
+          downloadParams.set('ve', videoExtension);
+        }
       }
       const downloadUrl = `${downloadBaseUrl}/download/${encodeURIComponent(photoToken)}${downloadParams.size ? `?${downloadParams.toString()}` : ''}`;
 
@@ -878,6 +982,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
       }
     } finally {
       setIsExporting(false);
+      isExportInFlightRef.current = false;
     }
   };
 
@@ -917,6 +1022,10 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
   };
 
   const startAutoSaveTimeout = () => {
+    if (hasSavedToCloudRef.current) {
+      return;
+    }
+
     if (autoSaveTimeoutRef.current) {
       clearTimeout(autoSaveTimeoutRef.current);
     }
@@ -926,6 +1035,10 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
   };
 
   const resetAutoSaveTimeout = () => {
+    if (hasSavedToCloudRef.current) {
+      return;
+    }
+
     startAutoSaveTimeout();
   };
 
@@ -937,12 +1050,15 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
   };
 
   const handleAutoSave = async () => {
-    if (isExporting) return; // Don't auto-save if already exporting
+    if (isExporting || isExportInFlightRef.current || hasSavedToCloudRef.current) {
+      return;
+    }
 
     setIsExporting(true);
     try {
       const dataUrl = await generateComposite(layout, photos, stickers, frameColor);
       await savePhotoToGallery(dataUrl); // Save without phone number for auto-save
+      hasSavedToCloudRef.current = true;
       // Return to main page after auto-save
       onRestart();
     } catch (err) {
@@ -960,6 +1076,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
     setIsExporting(true);
     try {
       await savePhotoToGallery(pendingPhotoDataUrl, phoneNumber);
+      hasSavedToCloudRef.current = true;
       setShowPhoneInput(false);
       setShowSaveConfirmation(true);
       setPendingPhotoDataUrl(null);
@@ -978,6 +1095,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
     setIsExporting(true);
     try {
       await savePhotoToGallery(pendingPhotoDataUrl);
+      hasSavedToCloudRef.current = true;
       setShowPhoneInput(false);
       setShowSaveConfirmation(true);
       setPendingPhotoDataUrl(null);
@@ -994,6 +1112,8 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
     setShowPhoneInput(false);
     setPendingPhotoDataUrl(null);
   };
+
+  const showSaveProcessingOverlay = isExporting && isExportInFlightRef.current && !showQrCode;
 
   return (
     <div className="flex flex-row h-[100dvh] w-full relative z-20 overflow-hidden bg-slate-950">
@@ -1013,7 +1133,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
           ref={containerRef}
           className="relative shrink-0 transition-all group border-4 border-slate-800 shadow-2xl touch-none"
           style={{
-             height: `80vh`,
+             height: `${previewScale}vh`,
              width: 'auto',
              aspectRatio: '2/3',
              background: frameColor,
@@ -1169,18 +1289,46 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
                 </button>
             </div>
 
-            {/* Save Button */}
-            <div className="mt-4 mb-4">
-              <button
+	            {/* Save Button */}
+	            <div className="mt-4 mb-4">
+	              <button
                 onClick={handleExport}
                 disabled={isExporting}
                 className="w-full bg-amber-200 text-slate-900 py-3 rounded font-serif font-bold tracking-wide flex items-center justify-center gap-2 hover:bg-white hover:shadow-[0_0_20px_rgba(253,230,138,0.3)] transition-all disabled:opacity-50 text-sm active:scale-[0.98]"
               >
-                {isExporting ? '...' : <><QrCode size={16} /> Save</>}
-              </button>
-            </div>
+                {showSaveProcessingOverlay ? (
+                  <>
+                    <span className="inline-block h-4 w-4 rounded-full border-2 border-slate-900/35 border-t-slate-900 animate-spin" />
+                    Processing...
+                  </>
+                ) : (
+                  <>
+                    <QrCode size={16} /> Save
+                  </>
+                )}
+	              </button>
+	            </div>
 
-            {hasVideoLayersForPreview && (
+              <div className="mb-4 p-3 bg-slate-900/60 border border-amber-200/20 rounded-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2 text-amber-100 text-xs uppercase tracking-widest font-serif">
+                    <Sliders size={12} />
+                    Preview Size
+                  </div>
+                  <span className="text-xs text-amber-200 font-mono">{previewScale}%</span>
+                </div>
+                <input
+                  type="range"
+                  min="55"
+                  max="90"
+                  step="1"
+                  value={previewScale}
+                  onChange={(event) => setPreviewScale(parseInt(event.target.value, 10))}
+                  className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-400"
+                />
+              </div>
+
+	            {hasVideoLayersForPreview && (
               <div className="mb-4 p-3 bg-slate-900/60 border border-amber-200/20 rounded-lg space-y-3">
                 <div className="flex items-center gap-2 text-amber-100 text-xs uppercase tracking-widest font-serif">
                   <Video size={12} />
@@ -1286,6 +1434,18 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
         </div>
       </div>
 
+      {showSaveProcessingOverlay && (
+        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-40 flex items-center justify-center p-6">
+          <div className="w-full max-w-sm bg-slate-900 border border-amber-200/20 rounded-2xl p-6 text-center shadow-2xl">
+            <div className="mx-auto mb-4 h-12 w-12 rounded-full border-4 border-amber-200/25 border-t-amber-200 animate-spin" />
+            <h2 className="text-xl font-serif text-amber-100 mb-2">Processing</h2>
+            <p className="text-slate-300 text-sm">
+              Saving your photo and preparing QR download. Please wait.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Phone Input Modal */}
       {showPhoneInput && (
         <PhoneInputModal
@@ -1313,7 +1473,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
               </div>
               {qrDownloadUrl && (
                 <p className="mt-4 text-xs text-slate-400 break-all px-2">
-                  {getReadableDownloadPath(qrDownloadUrl)}
+                  {qrDownloadUrl}
                 </p>
               )}
             </div>
@@ -1322,9 +1482,6 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
               <button
                 onClick={() => {
                   setShowQrCode(false);
-                  setQrCodeUrl(null);
-                  setQrDownloadUrl(null);
-                  setPendingPhotoDataUrl(null);
                 }}
                 className="flex-1 bg-transparent border border-amber-200/30 text-amber-100 py-3 rounded font-serif hover:bg-amber-200/5 transition-colors"
               >
