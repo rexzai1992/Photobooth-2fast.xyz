@@ -3,7 +3,7 @@ import { LayoutType, Sticker } from '../types';
 import { generateComposite } from '../utils/canvasUtils';
 import { savePhotoToGallery } from '../utils/storage';
 import { uploadBlobToR2 } from '../utils/r2Storage';
-import { Save, Palette, Image as ImageIcon, Sliders, X, RotateCw, QrCode, Play, Pause, Video } from 'lucide-react';
+import { Save, Palette, Image as ImageIcon, Sliders, X, RotateCw, QrCode, Play, Pause, Video, ExternalLink } from 'lucide-react';
 import { getCustomStickers, CustomSticker } from '../utils/stickerStorage';
 import { SVG_STRINGS } from './AssetLibrary';
 import PhoneInputModal from './PhoneInputModal';
@@ -1440,7 +1440,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
             <div className="mx-auto mb-4 h-12 w-12 rounded-full border-4 border-amber-200/25 border-t-amber-200 animate-spin" />
             <h2 className="text-xl font-serif text-amber-100 mb-2">Processing</h2>
             <p className="text-slate-300 text-sm">
-              Saving your photo and preparing QR download. Please wait.
+              Saving your photo and preparing your download link. Please wait.
             </p>
           </div>
         </div>
@@ -1464,9 +1464,9 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
               <div className="w-16 h-16 bg-amber-200/10 rounded-full flex items-center justify-center mx-auto mb-4">
                 <QrCode size={32} className="text-amber-200" />
               </div>
-              <h2 className="text-2xl font-serif text-white mb-2">Scan to Download</h2>
+              <h2 className="text-2xl font-serif text-white mb-2">Download Your Photo</h2>
               <p className="text-slate-300 text-lg mb-4">
-                Scan this QR code with your phone to download your photo
+                Scan this QR on another device, or open the link directly on this phone.
               </p>
               <div className="bg-white p-4 rounded-lg inline-block">
                 <img src={qrCodeUrl} alt="QR Code" className="w-48 h-48" />
@@ -1479,14 +1479,17 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
             </div>
 
             <div className="flex gap-3">
-              <button
-                onClick={() => {
-                  setShowQrCode(false);
-                }}
-                className="flex-1 bg-transparent border border-amber-200/30 text-amber-100 py-3 rounded font-serif hover:bg-amber-200/5 transition-colors"
-              >
-                Cancel
-              </button>
+              {qrDownloadUrl && (
+                <button
+                  onClick={() => {
+                    window.location.href = qrDownloadUrl;
+                  }}
+                  className="flex-1 bg-white/5 border border-white/15 text-white py-3 rounded font-serif hover:bg-white/10 transition-colors flex items-center justify-center gap-2"
+                >
+                  <ExternalLink size={16} />
+                  Open Link
+                </button>
+              )}
               <button
                 onClick={() => {
                   setShowQrCode(false);
@@ -1495,7 +1498,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
                   // Don't clear pendingPhotoDataUrl here as it might be used later
                   onRestart();
                 }}
-                className="flex-1 bg-amber-200 text-slate-900 py-3 rounded font-serif font-bold hover:bg-white hover:shadow-[0_0_20px_rgba(253,230,138,0.3)] transition-all"
+                className={`${qrDownloadUrl ? 'flex-1' : 'w-full'} bg-amber-200 text-slate-900 py-3 rounded font-serif font-bold hover:bg-white hover:shadow-[0_0_20px_rgba(253,230,138,0.3)] transition-all`}
               >
                 Done
               </button>

@@ -16,7 +16,8 @@ interface WakeLockSentinelLike {
 const KioskModeGuard: React.FC = () => {
   const location = useLocation();
   const isAdminRoute = location.pathname.startsWith('/admin');
-  const shouldForceKiosk = !isAdminRoute;
+  const isDownloadRoute = location.pathname.startsWith('/download/');
+  const shouldForceKiosk = !isAdminRoute && !isDownloadRoute;
   const [showFullscreenPrompt, setShowFullscreenPrompt] = useState(false);
   const wakeLockRef = useRef<WakeLockSentinelLike | null>(null);
 
