@@ -1,0 +1,30 @@
+{
+  "appId": "com.deepblue.photobooth",
+  "productName": "Deep Blue Photobooth",
+  "asar": true,
+  "files": [
+    "dist/**/*",
+    "electron/**/*",
+    "package.json"
+  ],
+  "directories": {
+    "output": "release"
+  },
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": [
+          "x64"
+        ]
+      }
+    ]
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "artifactName": "DeepBluePhotobooth-Setup-${version}.${ext}"
+  }
+}

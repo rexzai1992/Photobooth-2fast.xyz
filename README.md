@@ -48,6 +48,46 @@ Build check:
 npm run build
 ```
 
+## Desktop Kiosk (.exe) Mode
+
+This project can now run in two modes:
+
+- Web app (existing): `npm run dev` / Cloudflare Pages deploy.
+- Windows kiosk app (`.exe`): Electron wrapper that opens in fullscreen kiosk mode.
+
+Set the kiosk URL in `electron/kiosk.config.json`:
+
+```json
+{
+  "startUrl": "https://photobooth.izzul.xyz",
+  "allowNavigationHosts": ["photobooth.izzul.xyz"]
+}
+```
+
+Desktop development mode:
+
+```bash
+npm run desktop:dev
+```
+
+Build Windows installer (`.exe`):
+
+```bash
+npm run desktop:build
+```
+
+This command is pinned to Windows `x64` (standard Intel/AMD PCs).
+
+Output:
+
+- Installer: `release/DeepBluePhotobooth-Setup-<version>.exe`
+- Unpacked app (optional): `npm run desktop:build:dir`
+
+Note:
+
+- The kiosk wrapper blocks common browser escape shortcuts, but OS-level kiosk policy is still recommended for strict lock-down.
+- If Windows packaging from macOS fails in your environment, run the same command on a Windows machine/CI runner.
+
 ## Cloudflare Pages Setup
 
 In your Pages project:
