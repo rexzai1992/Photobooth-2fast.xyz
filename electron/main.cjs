@@ -127,7 +127,25 @@ function configurePermissions() {
     if (!allowedPermissions.has(permission)) return false;
 
     const requestUrl = requestingOrigin || getRequestUrl(webContents, details);
-    return isAllowedNavigation(requestUrl, allowedHosts);
+    if (!isAllowedNavigation(requestUrl, allowedHosts)) return false;
+
+    if (!mediaPermissions.has(permission)) {
+      return true;
+    }
+
+    const accessLabel = describeMediaAccess(permission, details);
+    const originLabel = (() => {
+      try {
+        return new URL(requestUrl).origin;
+      } catch (_error) {
+        return requestUrl || 'this app';
+      }
+    })();
+    const decisionKey = `${originLabel}|${accessLabel}`;
+    const cachedDecision = cachedMediaDecisions.get(decisionKey);
+
+    // Force first-time media access through setPermissionRequestHandler prompt.
+    return cachedDecision === true;
   });
 
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details = {}) => {

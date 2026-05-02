@@ -3,7 +3,7 @@ import { LayoutType, Sticker } from '../types';
 import { generateComposite } from '../utils/canvasUtils';
 import { savePhotoToGallery } from '../utils/storage';
 import { uploadBlobToR2 } from '../utils/r2Storage';
-import { Save, Palette, Image as ImageIcon, Sliders, X, RotateCw, QrCode, Play, Pause, Video, ExternalLink } from 'lucide-react';
+import { Save, Palette, Image as ImageIcon, Sliders, X, RotateCw, QrCode, Play, Pause, Video } from 'lucide-react';
 import { getCustomStickers, CustomSticker } from '../utils/stickerStorage';
 import { SVG_STRINGS } from './AssetLibrary';
 import PhoneInputModal from './PhoneInputModal';
@@ -1539,7 +1539,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
               </div>
               <h2 className="text-2xl font-serif text-white mb-2">Download Your Photo</h2>
               <p className="text-slate-300 text-lg mb-4">
-                Scan this QR on another device, or open the link directly on this phone.
+                Scan this QR on another device to download your photo.
               </p>
               <div className="bg-white p-4 rounded-lg inline-block">
                 <img src={qrCodeUrl} alt="QR Code" className="w-48 h-48" />
@@ -1551,18 +1551,11 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
               )}
             </div>
 
+            <div className="mb-4 rounded-lg border border-amber-200/30 bg-amber-200/10 px-4 py-3 text-amber-100 text-sm font-serif">
+              You can print the photo at front counter.
+            </div>
+
             <div className="flex gap-3">
-              {qrDownloadUrl && (
-                <button
-                  onClick={() => {
-                    window.location.href = qrDownloadUrl;
-                  }}
-                  className="flex-1 bg-white/5 border border-white/15 text-white py-3 rounded font-serif hover:bg-white/10 transition-colors flex items-center justify-center gap-2"
-                >
-                  <ExternalLink size={16} />
-                  Open Link
-                </button>
-              )}
               <button
                 onClick={() => {
                   setShowQrCode(false);
@@ -1571,7 +1564,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
                   // Don't clear pendingPhotoDataUrl here as it might be used later
                   onRestart();
                 }}
-                className={`${qrDownloadUrl ? 'flex-1' : 'w-full'} bg-amber-200 text-slate-900 py-3 rounded font-serif font-bold hover:bg-white hover:shadow-[0_0_20px_rgba(253,230,138,0.3)] transition-all`}
+                className="w-full bg-amber-200 text-slate-900 py-3 rounded font-serif font-bold hover:bg-white hover:shadow-[0_0_20px_rgba(253,230,138,0.3)] transition-all"
               >
                 Done
               </button>

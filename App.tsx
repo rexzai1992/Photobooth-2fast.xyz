@@ -24,7 +24,7 @@ declare global {
 }
 
 const HIDDEN_KIOSK_MENU_TAP_THRESHOLD = 7;
-const HIDDEN_KIOSK_MENU_RESET_MS = 3500;
+const HIDDEN_KIOSK_MENU_RESET_MS = 10000;
 
 const KioskModeGuard: React.FC = () => {
   const location = useLocation();
@@ -329,11 +329,6 @@ const PhotoboothApp: React.FC = () => {
   }, [clearHiddenTapResetTimer, showKioskMenu]);
 
   const handleCloseApplication = useCallback(() => {
-    const shouldCloseApplication = window.confirm('Close application now?');
-    if (!shouldCloseApplication) {
-      return;
-    }
-
     setCloseAppError('');
     if (window.kioskBridge?.closeApp) {
       window.kioskBridge.closeApp();
@@ -387,8 +382,8 @@ const PhotoboothApp: React.FC = () => {
         <button
           type="button"
           aria-label="Open kiosk menu"
-          onClick={handleHiddenKioskTap}
-          className="fixed top-0 right-0 z-[80] h-16 w-16 md:h-20 md:w-20 bg-transparent"
+          onPointerDown={handleHiddenKioskTap}
+          className="fixed top-0 right-0 z-[80] h-20 w-20 md:h-24 md:w-24 bg-transparent touch-manipulation"
         />
 
         {showKioskMenu && (
