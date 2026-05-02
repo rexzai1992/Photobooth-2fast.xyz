@@ -600,6 +600,9 @@ const buildMirroredSingleVideoWithFallback = async (videoSource: string): Promis
   return null;
 };
 
+const buildDownloadUrl = (baseUrl: string, photoToken: string, params: URLSearchParams): string =>
+  `${baseUrl}/download/${encodeURIComponent(photoToken)}${params.size ? `?${params.toString()}` : ''}`;
+
 const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart }) => {
   const [frameColor, setFrameColor] = useState<string>('#ffffff');
   const [isExporting, setIsExporting] = useState(false);
@@ -625,6 +628,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
   const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isExportInFlightRef = useRef(false);
   const hasSavedToCloudRef = useRef(false);
+  const isMountedRef = useRef(true);
   const draggingRef = useRef<{
     id: string;
     mode: 'move' | 'transform';
@@ -637,6 +641,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
   } | null>(null);
 
   useEffect(() => {
+    isMountedRef.current = true;
     loadCustomStickers();
     startAutoSaveTimeout();
 
@@ -652,6 +657,7 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
     });
 
     return () => {
+      isMountedRef.current = false;
       clearConfirmationTimers();
       clearAutoSaveTimeout();
 
@@ -890,54 +896,17 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
         : '';
       const downloadBaseUrl = (configuredPublicUrl || window.location.origin).replace(/\/+$/, '');
       const expiresAt = Date.now() + DOWNLOAD_TOKEN_TTL_MS;
-
-      // Store the photo temporarily with the token for same-browser download page.
-      let selectedVideoForDownload: string | null = captureVideos[0] || null;
-      let usedComposedVideo = false;
-      if (layout === 'postcard' && captureVideos.length > 0) {
-        try {
-          const composedPreviewVideo = await buildPostcardCompositeVideoWithFallback(
-            captureVideos,
-            stickers,
-            frameColor
-          );
-          if (composedPreviewVideo) {
-            selectedVideoForDownload = composedPreviewVideo;
-            usedComposedVideo = true;
-          }
-        } catch (videoComposeError) {
-          console.warn('Postcard video composition failed, continuing with photo QR flow.', videoComposeError);
-        }
-      }
-
-      if (selectedVideoForDownload && !usedComposedVideo) {
-        try {
-          const mirroredPreviewVideo = await buildMirroredSingleVideoWithFallback(selectedVideoForDownload);
-          if (mirroredPreviewVideo) {
-            selectedVideoForDownload = mirroredPreviewVideo;
-          }
-        } catch (videoMirrorError) {
-          console.warn('Mirroring preview video failed, using original capture orientation.', videoMirrorError);
-        }
-      }
-
-      if (selectedVideoForDownload && !(await hasExpectedBoomerangDuration(selectedVideoForDownload))) {
-        console.warn('Preview video is shorter than expected 6s boomerang target; skipping video upload.');
-        selectedVideoForDownload = null;
-      }
-
-      const expectedVideoPath = selectedVideoForDownload
-        ? await uploadVideoPreviewToR2(photoToken, selectedVideoForDownload)
-        : null;
       const downloadParams = new URLSearchParams();
-      if (expectedVideoPath) {
+      const shouldProcessVideoInBackground = captureVideos.length > 0;
+      const initialVideoMimeType =
+        captureVideos[0]?.match(/^data:(.*?);base64,/)?.[1] || 'video/webm';
+      const initialVideoExtension = getVideoFileExtension(initialVideoMimeType);
+
+      if (shouldProcessVideoInBackground) {
         downloadParams.set('v', '1');
-        const videoExtension = expectedVideoPath.split('.').pop()?.toLowerCase();
-        if (videoExtension) {
-          downloadParams.set('ve', videoExtension);
-        }
+        downloadParams.set('ve', initialVideoExtension);
       }
-      const downloadUrl = `${downloadBaseUrl}/download/${encodeURIComponent(photoToken)}${downloadParams.size ? `?${downloadParams.toString()}` : ''}`;
+      const downloadUrl = buildDownloadUrl(downloadBaseUrl, photoToken, downloadParams);
 
       // Generate QR code as data URL
       const qrCodeDataUrl = await QRCode.toDataURL(downloadUrl, {
@@ -954,8 +923,9 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
         sessionStorage.setItem(`photo_${photoToken}`, JSON.stringify({
           dataUrl,
           photoId,
-          captureVideo: selectedVideoForDownload,
-          captureVideoPath: expectedVideoPath,
+          captureVideoPath: null,
+          captureVideoProcessing: shouldProcessVideoInBackground,
+          captureVideoExpectedExtension: initialVideoExtension,
           expiresAt
         }));
       } catch (storageError) {
@@ -963,6 +933,8 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
         sessionStorage.setItem(`photo_${photoToken}`, JSON.stringify({
           dataUrl,
           photoId,
+          captureVideoProcessing: shouldProcessVideoInBackground,
+          captureVideoExpectedExtension: initialVideoExtension,
           expiresAt
         }));
       }
@@ -970,6 +942,107 @@ const PhotoEditor: React.FC<Props> = ({ photos, layout, captureVideos, onRestart
       setQrCodeUrl(qrCodeDataUrl);
       setQrDownloadUrl(downloadUrl);
       setShowQrCode(true);
+
+      if (shouldProcessVideoInBackground) {
+        void (async () => {
+          let selectedVideoForDownload: string | null = captureVideos[0] || null;
+          let usedComposedVideo = false;
+
+          if (layout === 'postcard' && captureVideos.length > 0) {
+            try {
+              const composedPreviewVideo = await buildPostcardCompositeVideoWithFallback(
+                captureVideos,
+                stickers,
+                frameColor
+              );
+              if (composedPreviewVideo) {
+                selectedVideoForDownload = composedPreviewVideo;
+                usedComposedVideo = true;
+              }
+            } catch (videoComposeError) {
+              console.warn('Postcard video composition failed, continuing with photo QR flow.', videoComposeError);
+            }
+          }
+
+          if (selectedVideoForDownload && !usedComposedVideo) {
+            try {
+              const mirroredPreviewVideo = await buildMirroredSingleVideoWithFallback(selectedVideoForDownload);
+              if (mirroredPreviewVideo) {
+                selectedVideoForDownload = mirroredPreviewVideo;
+              }
+            } catch (videoMirrorError) {
+              console.warn('Mirroring preview video failed, using original capture orientation.', videoMirrorError);
+            }
+          }
+
+          if (selectedVideoForDownload && !(await hasExpectedBoomerangDuration(selectedVideoForDownload))) {
+            console.warn('Preview video is shorter than expected 6s boomerang target; skipping video upload.');
+            selectedVideoForDownload = null;
+          }
+
+          const expectedVideoPath = selectedVideoForDownload
+            ? await uploadVideoPreviewToR2(photoToken, selectedVideoForDownload)
+            : null;
+
+          const updatedParams = new URLSearchParams(downloadParams);
+          if (expectedVideoPath) {
+            updatedParams.set('video', expectedVideoPath);
+            const resolvedVideoExtension = expectedVideoPath.split('.').pop()?.toLowerCase();
+            if (resolvedVideoExtension) {
+              updatedParams.set('ve', resolvedVideoExtension);
+            }
+          }
+
+          const updatedDownloadUrl = buildDownloadUrl(downloadBaseUrl, photoToken, updatedParams);
+
+          try {
+            const existingPayload = sessionStorage.getItem(`photo_${photoToken}`);
+            const parsed = existingPayload ? JSON.parse(existingPayload) : {};
+            sessionStorage.setItem(`photo_${photoToken}`, JSON.stringify({
+              ...parsed,
+              dataUrl,
+              photoId,
+              captureVideoPath: expectedVideoPath,
+              captureVideoProcessing: false,
+              captureVideoExpectedExtension: initialVideoExtension,
+              expiresAt
+            }));
+          } catch (storageError) {
+            console.warn('Failed to update background video session payload.', storageError);
+          }
+
+          if (!isMountedRef.current) {
+            return;
+          }
+
+          setQrDownloadUrl(updatedDownloadUrl);
+          const updatedQrCodeDataUrl = await QRCode.toDataURL(updatedDownloadUrl, {
+            width: 256,
+            margin: 2,
+            color: {
+              dark: '#000000',
+              light: '#FFFFFF'
+            }
+          });
+          if (isMountedRef.current) {
+            setQrCodeUrl(updatedQrCodeDataUrl);
+          }
+        })().catch(backgroundVideoError => {
+          console.warn('Background video preparation failed, photo QR remains available.', backgroundVideoError);
+          try {
+            const existingPayload = sessionStorage.getItem(`photo_${photoToken}`);
+            const parsed = existingPayload ? JSON.parse(existingPayload) : {};
+            sessionStorage.setItem(`photo_${photoToken}`, JSON.stringify({
+              ...parsed,
+              captureVideoPath: null,
+              captureVideoProcessing: false,
+              captureVideoExpectedExtension: initialVideoExtension
+            }));
+          } catch {
+            // Ignore session payload update errors.
+          }
+        });
+      }
 
     } catch (err) {
       console.error('Error during save process:', err);

@@ -17,6 +17,8 @@ const PREVIEW_VIDEO_EXTENSION = 'webm';
 const PREVIEW_VIDEO_BASE_DURATION_SECONDS = 3;
 const PREVIEW_VIDEO_DURATION_TOLERANCE_SECONDS = 0.6;
 const SUPPORTED_VIDEO_EXTENSIONS = new Set(['webm', 'mp4', 'mov', 'ogv']);
+const VIDEO_PROCESSING_POLL_INTERVAL_MS = 2500;
+const VIDEO_PROCESSING_MAX_POLLS = 48;
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -134,6 +136,51 @@ const deriveFullPhotoPath = (path: string | null | undefined): string | null => 
   return trimmedPath.replace(/-preview(\.[a-z0-9]+)$/i, '-full$1');
 };
 
+const buildVideoPathCandidates = ({
+  explicitPath,
+  hasVideoFlag,
+  token,
+  preferredExtension
+}: {
+  explicitPath: string;
+  hasVideoFlag: boolean;
+  token: string | null;
+  preferredExtension: string;
+}): string[] => {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  const addCandidate = (value: string) => {
+    const normalized = value.trim();
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    candidates.push(normalized);
+  };
+
+  addCandidate(explicitPath);
+
+  if (!hasVideoFlag || !token) {
+    return candidates;
+  }
+
+  const fallbackExtensions = Array.from(SUPPORTED_VIDEO_EXTENSIONS);
+  const extensionOrder = [preferredExtension, ...fallbackExtensions];
+  for (const extension of extensionOrder) {
+    if (!SUPPORTED_VIDEO_EXTENSIONS.has(extension)) continue;
+    addCandidate(`photos/${token}-preview-video.${extension}`);
+  }
+
+  return candidates;
+};
+
+const isLikelyVideoResponse = (contentType: string | null): boolean => {
+  if (!contentType) {
+    return true;
+  }
+
+  const normalized = contentType.toLowerCase();
+  return normalized.startsWith('video/') || normalized === 'application/octet-stream';
+};
+
 const PhotoDownload: React.FC = () => {
   const { token } = useParams<{ token: string }>();
   const navigate = useNavigate();
@@ -147,6 +194,10 @@ const PhotoDownload: React.FC = () => {
   const [isSaved, setIsSaved] = useState(false);
   const [error, setError] = useState('');
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
+  const [videoExpected, setVideoExpected] = useState(false);
+  const [isVideoProcessing, setIsVideoProcessing] = useState(false);
+  const [videoProcessingTimedOut, setVideoProcessingTimedOut] = useState(false);
+  const [videoPathCandidates, setVideoPathCandidates] = useState<string[]>([]);
   const previewVideoReplayCountRef = useRef(0);
 
   const handleNumberPadInput = (value: string) => {
@@ -178,6 +229,10 @@ const PhotoDownload: React.FC = () => {
     setPhotoDataUrl(null);
     setFullPhotoUrl(null);
     setCaptureVideoUrl(null);
+    setVideoExpected(false);
+    setIsVideoProcessing(false);
+    setVideoProcessingTimedOut(false);
+    setVideoPathCandidates([]);
     setPhotoId(null);
     setError(TOKEN_EXPIRED_MESSAGE);
   };
@@ -224,6 +279,10 @@ const PhotoDownload: React.FC = () => {
       setError('');
       setFullPhotoUrl(null);
       setCaptureVideoUrl(null);
+      setVideoExpected(false);
+      setIsVideoProcessing(false);
+      setVideoProcessingTimedOut(false);
+      setVideoPathCandidates([]);
 
       const normalizedToken = normalizeToken(token);
       const tokenCandidates = extractTokenCandidates(normalizedToken);
@@ -240,20 +299,23 @@ const PhotoDownload: React.FC = () => {
       const primaryToken = tokenCandidates[0] || null;
       const inferredPreviewPath = primaryToken ? `photos/${primaryToken}-preview.jpg` : '';
       const inferredFullPath = primaryToken ? `photos/${primaryToken}-full.jpg` : '';
-      const inferredVideoPath = primaryToken ? `photos/${primaryToken}-preview-video.${inferredVideoExtension}` : '';
       const hintedPath = previewPathHint || fullPathHint || inferredPreviewPath || inferredFullPath;
-      const resolvedVideoPathHint = videoPathHint || (hasVideoFlag ? inferredVideoPath : '');
+      const initialVideoPathCandidates = buildVideoPathCandidates({
+        explicitPath: videoPathHint,
+        hasVideoFlag,
+        token: primaryToken,
+        preferredExtension: inferredVideoExtension
+      });
       setExpiresAt(expiryFromQuery);
+      setVideoExpected(initialVideoPathCandidates.length > 0);
+      setVideoPathCandidates(initialVideoPathCandidates);
+      setIsVideoProcessing(initialVideoPathCandidates.length > 0);
 
       if (isExpired(expiryFromQuery)) {
         if (!isCancelled) {
           showExpiredState();
         }
         return;
-      }
-
-      if (resolvedVideoPathHint && !isCancelled) {
-        setCaptureVideoUrl(getPhotoDeliveryUrl(resolvedVideoPathHint));
       }
 
       // 1) Fast path for same-browser flow (legacy/session behavior).
@@ -289,18 +351,48 @@ const PhotoDownload: React.FC = () => {
             return;
           }
 
-          if (!isCancelled) {
-            setPhotoDataUrl(typeof parsed?.dataUrl === 'string' ? parsed.dataUrl : null);
-            setFullPhotoUrl(typeof parsed?.dataUrl === 'string' ? parsed.dataUrl : null);
-            setPhotoId(typeof parsed?.photoId === 'string' ? parsed.photoId : tokenCandidates[0] || normalizedToken || sessionToken);
-            if (typeof parsed?.captureVideoPath === 'string' && parsed.captureVideoPath.trim()) {
-              setCaptureVideoUrl(getPhotoDeliveryUrl(parsed.captureVideoPath));
-            } else if (typeof parsed?.captureVideo === 'string') {
-              setCaptureVideoUrl(getPhotoDeliveryUrl(parsed.captureVideo));
-            } else if (Array.isArray(parsed?.captureVideos)) {
-              const firstVideo = parsed.captureVideos.find((item: unknown) => typeof item === 'string');
-              setCaptureVideoUrl(typeof firstVideo === 'string' ? getPhotoDeliveryUrl(firstVideo) : null);
-            }
+            if (!isCancelled) {
+              setPhotoDataUrl(typeof parsed?.dataUrl === 'string' ? parsed.dataUrl : null);
+              setFullPhotoUrl(typeof parsed?.dataUrl === 'string' ? parsed.dataUrl : null);
+              setPhotoId(typeof parsed?.photoId === 'string' ? parsed.photoId : tokenCandidates[0] || normalizedToken || sessionToken);
+              if (typeof parsed?.captureVideoPath === 'string' && parsed.captureVideoPath.trim()) {
+                setVideoExpected(true);
+                setVideoPathCandidates(current => buildVideoPathCandidates({
+                  explicitPath: parsed.captureVideoPath,
+                  hasVideoFlag: true,
+                  token: primaryToken,
+                  preferredExtension: inferredVideoExtension
+                }).concat(current).filter((value, index, list) => list.indexOf(value) === index));
+                setIsVideoProcessing(true);
+              } else if (typeof parsed?.captureVideo === 'string') {
+                const directVideoUrl = parsed.captureVideo;
+                if (directVideoUrl.startsWith('data:')) {
+                  setCaptureVideoUrl(directVideoUrl);
+                  setVideoExpected(true);
+                  setIsVideoProcessing(false);
+                  setVideoProcessingTimedOut(false);
+                } else {
+                  setVideoExpected(true);
+                  setVideoPathCandidates(current => buildVideoPathCandidates({
+                    explicitPath: directVideoUrl,
+                    hasVideoFlag: true,
+                    token: primaryToken,
+                    preferredExtension: inferredVideoExtension
+                  }).concat(current).filter((value, index, list) => list.indexOf(value) === index));
+                  setIsVideoProcessing(true);
+                }
+              } else if (Array.isArray(parsed?.captureVideos)) {
+                const firstVideo = parsed.captureVideos.find((item: unknown) => typeof item === 'string');
+                if (typeof firstVideo === 'string' && firstVideo.startsWith('data:')) {
+                  setCaptureVideoUrl(firstVideo);
+                  setVideoExpected(true);
+                  setIsVideoProcessing(false);
+                  setVideoProcessingTimedOut(false);
+                }
+              } else if (parsed?.captureVideoProcessing) {
+                setVideoExpected(true);
+                setIsVideoProcessing(true);
+              }
             if (alreadySavedOnce) {
               setIsSaved(true);
             }
@@ -437,6 +529,70 @@ const PhotoDownload: React.FC = () => {
     previewVideoReplayCountRef.current = 0;
   }, [captureVideoUrl]);
 
+  useEffect(() => {
+    if (!videoExpected || captureVideoUrl || videoPathCandidates.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    const candidateUrls = videoPathCandidates.map(path => getPhotoDeliveryUrl(path));
+
+    const probeVideo = async (url: string): Promise<boolean> => {
+      try {
+        const response = await fetch(url, {
+          method: 'GET',
+          cache: 'no-store'
+        });
+        if (!response.ok) {
+          return false;
+        }
+
+        const contentType = response.headers.get('content-type');
+        try {
+          await response.body?.cancel();
+        } catch {
+          // Ignore body cancellation errors.
+        }
+        return isLikelyVideoResponse(contentType);
+      } catch {
+        return false;
+      }
+    };
+
+    const pollForVideo = async () => {
+      setIsVideoProcessing(true);
+      setVideoProcessingTimedOut(false);
+
+      for (let attempt = 0; attempt < VIDEO_PROCESSING_MAX_POLLS && !cancelled; attempt += 1) {
+        for (const url of candidateUrls) {
+          const isReady = await probeVideo(url);
+          if (!isReady || cancelled) {
+            continue;
+          }
+          setCaptureVideoUrl(url);
+          setIsVideoProcessing(false);
+          setVideoProcessingTimedOut(false);
+          return;
+        }
+
+        if (attempt < VIDEO_PROCESSING_MAX_POLLS - 1) {
+          await sleep(VIDEO_PROCESSING_POLL_INTERVAL_MS);
+        }
+      }
+
+      if (!cancelled) {
+        setIsVideoProcessing(false);
+        setVideoProcessingTimedOut(true);
+      }
+    };
+
+    void pollForVideo();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [captureVideoUrl, videoExpected, videoPathCandidates]);
+
   const handlePhoneSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!photoDataUrl || !phoneNumber.trim()) return;
@@ -535,7 +691,12 @@ const PhotoDownload: React.FC = () => {
   };
 
   const handleVideoDownload = async () => {
-    if (!captureVideoUrl) return;
+    if (!captureVideoUrl) {
+      if (videoExpected && isVideoProcessing) {
+        setError('Video is still processing. Please wait a moment and try again.');
+      }
+      return;
+    }
 
     try {
       if (captureVideoUrl.startsWith('data:')) {
@@ -601,6 +762,10 @@ const PhotoDownload: React.FC = () => {
           <p className="text-slate-300 mb-6">
             {captureVideoUrl
               ? 'Your photo has been saved successfully. You can now download the photo and video.'
+              : (videoExpected && isVideoProcessing)
+                ? 'Your photo is ready. Video is still processing, please wait.'
+                : (videoExpected && videoProcessingTimedOut)
+                  ? 'Your photo is ready. Video is still processing, please wait a bit and try again.'
               : 'Your photo has been saved successfully. You can now download it.'}
           </p>
 
@@ -647,6 +812,22 @@ const PhotoDownload: React.FC = () => {
             </div>
           )}
 
+          {videoExpected && !captureVideoUrl && (
+            <div className="mb-6 rounded-lg border border-amber-200/20 bg-slate-950/60 p-4 text-left">
+              <p className="text-amber-100 text-sm font-serif mb-2">Preview Video</p>
+              <div className="flex items-center gap-3 text-slate-300 text-sm">
+                {isVideoProcessing && (
+                  <span className="inline-block h-4 w-4 rounded-full border-2 border-amber-200/40 border-t-amber-200 animate-spin" />
+                )}
+                <span>
+                  {isVideoProcessing
+                    ? 'Video is processing. Please wait...'
+                    : 'Video is still processing. Please try again in a moment.'}
+                </span>
+              </div>
+            </div>
+          )}
+
           <div className="space-y-3">
             <button
               onClick={handleDownload}
@@ -663,6 +844,26 @@ const PhotoDownload: React.FC = () => {
               >
                 <Video size={20} />
                 Download Video
+              </button>
+            )}
+
+            {!captureVideoUrl && videoExpected && (
+              <button
+                onClick={handleVideoDownload}
+                disabled={isVideoProcessing}
+                className="w-full bg-slate-800 border border-amber-200/20 text-amber-100 font-bold py-3 rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {isVideoProcessing ? (
+                  <>
+                    <span className="inline-block h-4 w-4 rounded-full border-2 border-amber-200/35 border-t-amber-100 animate-spin" />
+                    Video Processing...
+                  </>
+                ) : (
+                  <>
+                    <Video size={20} />
+                    Retry Video
+                  </>
+                )}
               </button>
             )}
 

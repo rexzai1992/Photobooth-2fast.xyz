@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, session, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
@@ -72,6 +72,36 @@ function isAllowedNavigation(urlString, allowedHosts) {
   }
 }
 
+function getRequestUrl(webContents, details) {
+  if (details && typeof details.requestingUrl === 'string' && details.requestingUrl) {
+    return details.requestingUrl;
+  }
+
+  if (details && typeof details.securityOrigin === 'string' && details.securityOrigin) {
+    return details.securityOrigin;
+  }
+
+  if (webContents && typeof webContents.getURL === 'function') {
+    return webContents.getURL();
+  }
+
+  return '';
+}
+
+function describeMediaAccess(permission, details) {
+  if (permission === 'camera') return 'camera';
+  if (permission === 'microphone') return 'microphone';
+
+  const requestedTypes = Array.isArray(details?.mediaTypes) ? details.mediaTypes : [];
+  const hasVideo = requestedTypes.includes('video');
+  const hasAudio = requestedTypes.includes('audio');
+
+  if (hasVideo && hasAudio) return 'camera and microphone';
+  if (hasVideo) return 'camera';
+  if (hasAudio) return 'microphone';
+  return 'camera and microphone';
+}
+
 function shouldBlockShortcut(input) {
   const key = (input.key || '').toLowerCase();
   const ctrlOrMeta = input.control || input.meta;
@@ -86,9 +116,75 @@ function shouldBlockShortcut(input) {
 }
 
 function configurePermissions() {
-  const allowed = new Set(['media', 'camera', 'microphone', 'fullscreen']);
-  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-    callback(allowed.has(permission));
+  const allowedPermissions = new Set(['media', 'camera', 'microphone', 'fullscreen']);
+  const mediaPermissions = new Set(['media', 'camera', 'microphone']);
+  const kioskConfig = readKioskConfig();
+  const startUrl = getStartUrl(kioskConfig);
+  const allowedHosts = getAllowedHosts(kioskConfig, startUrl);
+  const cachedMediaDecisions = new Map();
+
+  session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+    if (!allowedPermissions.has(permission)) return false;
+
+    const requestUrl = requestingOrigin || getRequestUrl(webContents, details);
+    return isAllowedNavigation(requestUrl, allowedHosts);
+  });
+
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details = {}) => {
+    if (!allowedPermissions.has(permission)) return callback(false);
+
+    const requestUrl = getRequestUrl(webContents, details);
+    if (!isAllowedNavigation(requestUrl, allowedHosts)) return callback(false);
+
+    if (!mediaPermissions.has(permission)) return callback(true);
+
+    const accessLabel = describeMediaAccess(permission, details);
+    const originLabel = (() => {
+      try {
+        return new URL(requestUrl).origin;
+      } catch (_error) {
+        return requestUrl || 'this app';
+      }
+    })();
+    const decisionKey = `${originLabel}|${accessLabel}`;
+    const cachedDecision = cachedMediaDecisions.get(decisionKey);
+    if (typeof cachedDecision === 'boolean') return callback(cachedDecision);
+
+    const ownerWindow =
+      BrowserWindow.fromWebContents(webContents) || BrowserWindow.getFocusedWindow() || null;
+
+    dialog
+      .showMessageBox(ownerWindow, {
+        type: 'question',
+        buttons: ['Allow', 'Deny'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+        title: 'Camera Permission',
+        message: 'Allow camera access?',
+        detail: `${originLabel} wants to use your ${accessLabel}.`,
+      })
+      .then(({ response }) => {
+        const granted = response === 0;
+        cachedMediaDecisions.set(decisionKey, granted);
+        callback(granted);
+      })
+      .catch((error) => {
+        console.error('Failed to show media permission dialog.', error);
+        callback(false);
+      });
+  });
+}
+
+function configureIpcHandlers() {
+  ipcMain.on('kiosk:close-app', (event) => {
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+    if (sourceWindow && !sourceWindow.isDestroyed()) {
+      sourceWindow.close();
+      return;
+    }
+
+    app.quit();
   });
 }
 
@@ -109,6 +205,7 @@ async function createMainWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, 'preload.cjs'),
       sandbox: true,
       spellcheck: false,
     },
@@ -151,6 +248,7 @@ async function createMainWindow() {
 
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
+  configureIpcHandlers();
   configurePermissions();
   await createMainWindow();
 

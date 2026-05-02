@@ -3,7 +3,7 @@
   "description": "Deep Blue Photobooth web app with Windows kiosk wrapper",
   "author": "Deep Blue",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
