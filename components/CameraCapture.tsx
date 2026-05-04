@@ -333,7 +333,7 @@ const CameraCapture: React.FC<Props> = ({ layout, onComplete }) => {
 
       segmenter.setOptions({
         modelSelection: 0,
-        selfieMode: true,
+        selfieMode: false,
       });
 
       segmenter.onResults(results => {
