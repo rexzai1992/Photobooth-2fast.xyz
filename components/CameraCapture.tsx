@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Camera, Video } from 'lucide-react';
+import { Results as SegmentationResults, SelfieSegmentation } from '@mediapipe/selfie_segmentation';
 import { LAYOUT_CONFIG, LayoutType } from '../types';
 
 interface Props {
@@ -13,6 +14,19 @@ const FINISH_DELAY_MS = 600;
 const VIDEO_CHUNK_MS = 250;
 const SHOT_RECORD_POST_CAPTURE_MS = 350;
 const DEFAULT_VIDEO_MIME = 'video/webm';
+const SEGMENTATION_MAX_FRAME_WIDTH = 1280;
+const FOREGROUND_CONFIDENCE_LOW = 0.12;
+const FOREGROUND_CONFIDENCE_HIGH = 0.58;
+const TEMPORAL_MASK_BLEND_PREVIOUS = 0.7;
+const SEGMENTATION_INIT_RETRY_MS = 1600;
+const SEGMENTATION_INIT_MAX_ATTEMPTS = 4;
+const MASK_CHANNEL_SAMPLE_STRIDE = 48;
+
+const resolveMediapipeAssetUrl = (path: string): string => {
+  const fileName = path.split('/').pop();
+  if (!fileName) return path;
+  return `/mediapipe/${fileName}`;
+};
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const getIdleStatusText = (layout: LayoutType) =>
@@ -61,7 +75,20 @@ const getSupportedVideoMimeType = (): string => {
 
 const CameraCapture: React.FC<Props> = ({ layout, onComplete }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const captureCanvasRef = useRef<HTMLCanvasElement>(null);
+  const previewCanvasRef = useRef<HTMLCanvasElement>(null);
+  const sourceFrameCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const maskFrameCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const compositedFrameCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const selfieSegmentationRef = useRef<SelfieSegmentation | null>(null);
+  const segmentationLoopIdRef = useRef<number | null>(null);
+  const segmentationInFlightRef = useRef(false);
+  const hasSegmentedFrameRef = useRef(false);
+  const maskChannelIndexRef = useRef<number>(0);
+  const segmentationStatusLockedRef = useRef(false);
+  const segmentationInitAttemptsRef = useRef(0);
+  const previousMaskAlphaRef = useRef<Float32Array | null>(null);
+  const previousMaskPixelCountRef = useRef(0);
   const isCapturingRef = useRef(false);
 
   const [stream, setStream] = useState<MediaStream | null>(null);
@@ -73,10 +100,171 @@ const CameraCapture: React.FC<Props> = ({ layout, onComplete }) => {
   const [countdown, setCountdown] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [statusText, setStatusText] = useState(getIdleStatusText(layout));
+  const [isSegmentationActive, setIsSegmentationActive] = useState(false);
+  const [isSegmentationUnavailable, setIsSegmentationUnavailable] = useState(false);
+  const [segmentationErrorDetail, setSegmentationErrorDetail] = useState<string | null>(null);
 
   const targetCount = LAYOUT_CONFIG[layout].photoCount;
   const targetAspect = layout === 'postcard' ? 16 / 9 : 4 / 3;
   const shouldRecordVideo = layout === 'postcard' || layout === 'strips';
+
+  const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+  const smoothstep = (edge0: number, edge1: number, value: number) => {
+    const t = clamp01((value - edge0) / Math.max(edge1 - edge0, 0.00001));
+    return t * t * (3 - 2 * t);
+  };
+
+  const getOrCreateWorkerCanvas = useCallback((canvasRef: React.MutableRefObject<HTMLCanvasElement | null>) => {
+    if (!canvasRef.current) {
+      canvasRef.current = document.createElement('canvas');
+    }
+    return canvasRef.current;
+  }, []);
+
+  const syncCanvasToVideo = useCallback((canvas: HTMLCanvasElement, video: HTMLVideoElement) => {
+    if (video.videoWidth === 0 || video.videoHeight === 0) {
+      return false;
+    }
+
+    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+    }
+
+    return true;
+  }, []);
+
+  const drawRawPreviewFrame = useCallback(() => {
+    const video = videoRef.current;
+    const previewCanvas = previewCanvasRef.current;
+    if (!video || !previewCanvas || video.videoWidth === 0 || video.videoHeight === 0) {
+      return;
+    }
+
+    if (!syncCanvasToVideo(previewCanvas, video)) {
+      return;
+    }
+
+    const context = previewCanvas.getContext('2d');
+    if (!context) return;
+
+    context.save();
+    context.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+    context.translate(previewCanvas.width, 0);
+    context.scale(-1, 1);
+    context.drawImage(video, 0, 0, previewCanvas.width, previewCanvas.height);
+    context.restore();
+  }, [syncCanvasToVideo]);
+
+  const drawSegmentedPreviewFrame = useCallback((results: SegmentationResults) => {
+    const previewCanvas = previewCanvasRef.current;
+    if (!previewCanvas) return;
+
+    const resultImage = results.image as { width?: number; height?: number };
+    const sourceWidth = resultImage.width ?? previewCanvas.width;
+    const sourceHeight = resultImage.height ?? previewCanvas.height;
+    if (!sourceWidth || !sourceHeight) return;
+
+    const scale = Math.min(1, SEGMENTATION_MAX_FRAME_WIDTH / sourceWidth);
+    const width = Math.max(2, Math.round(sourceWidth * scale));
+    const height = Math.max(2, Math.round(sourceHeight * scale));
+
+    if (previewCanvas.width !== width || previewCanvas.height !== height) {
+      previewCanvas.width = width;
+      previewCanvas.height = height;
+    }
+
+    const sourceCanvas = getOrCreateWorkerCanvas(sourceFrameCanvasRef);
+    const maskCanvas = getOrCreateWorkerCanvas(maskFrameCanvasRef);
+    const compositedCanvas = getOrCreateWorkerCanvas(compositedFrameCanvasRef);
+
+    if (sourceCanvas.width !== width || sourceCanvas.height !== height) {
+      sourceCanvas.width = width;
+      sourceCanvas.height = height;
+    }
+    if (maskCanvas.width !== width || maskCanvas.height !== height) {
+      maskCanvas.width = width;
+      maskCanvas.height = height;
+    }
+    if (compositedCanvas.width !== width || compositedCanvas.height !== height) {
+      compositedCanvas.width = width;
+      compositedCanvas.height = height;
+    }
+
+    const sourceContext = sourceCanvas.getContext('2d', { willReadFrequently: true });
+    const maskContext = maskCanvas.getContext('2d', { willReadFrequently: true });
+    const compositedContext = compositedCanvas.getContext('2d');
+    const context = previewCanvas.getContext('2d');
+    if (!sourceContext || !maskContext || !compositedContext || !context) return;
+
+    sourceContext.clearRect(0, 0, width, height);
+    sourceContext.drawImage(results.image, 0, 0, width, height);
+
+    maskContext.clearRect(0, 0, width, height);
+    maskContext.filter = 'blur(1px)';
+    maskContext.drawImage(results.segmentationMask, 0, 0, width, height);
+    maskContext.filter = 'none';
+
+    const sourcePixels = sourceContext.getImageData(0, 0, width, height);
+    const maskPixels = maskContext.getImageData(0, 0, width, height);
+    const sourceData = sourcePixels.data;
+    const maskData = maskPixels.data;
+
+    if (!hasSegmentedFrameRef.current) {
+      const channelRange = [0, 1, 2, 3].map(channelOffset => {
+        let min = 255;
+        let max = 0;
+        for (let i = channelOffset; i < maskData.length; i += 4 * MASK_CHANNEL_SAMPLE_STRIDE) {
+          const value = maskData[i];
+          if (value < min) min = value;
+          if (value > max) max = value;
+        }
+        return max - min;
+      });
+
+      let bestChannelIndex = 0;
+      for (let i = 1; i < channelRange.length; i += 1) {
+        if (channelRange[i] > channelRange[bestChannelIndex]) {
+          bestChannelIndex = i;
+        }
+      }
+      maskChannelIndexRef.current = bestChannelIndex;
+    }
+
+    const maskChannelIndex = maskChannelIndexRef.current;
+    const pixelCount = width * height;
+    if (!previousMaskAlphaRef.current || previousMaskPixelCountRef.current !== pixelCount) {
+      previousMaskAlphaRef.current = new Float32Array(pixelCount);
+      previousMaskPixelCountRef.current = pixelCount;
+    }
+    const previousMaskAlpha = previousMaskAlphaRef.current;
+
+    for (let i = 0, pixelIndex = 0; i < sourceData.length; i += 4, pixelIndex += 1) {
+      const confidence = maskData[i + maskChannelIndex] / 255;
+      const matte = smoothstep(FOREGROUND_CONFIDENCE_LOW, FOREGROUND_CONFIDENCE_HIGH, confidence);
+      const previousAlpha = hasSegmentedFrameRef.current ? previousMaskAlpha[pixelIndex] : matte;
+      const temporalAlpha = (previousAlpha * TEMPORAL_MASK_BLEND_PREVIOUS) + (matte * (1 - TEMPORAL_MASK_BLEND_PREVIOUS));
+      previousMaskAlpha[pixelIndex] = temporalAlpha;
+      const alpha = Math.pow(temporalAlpha, 0.55);
+      const invAlpha = 1 - alpha;
+
+      sourceData[i] = sourceData[i] * alpha + 255 * invAlpha;
+      sourceData[i + 1] = sourceData[i + 1] * alpha + 255 * invAlpha;
+      sourceData[i + 2] = sourceData[i + 2] * alpha + 255 * invAlpha;
+      sourceData[i + 3] = 255;
+    }
+
+    compositedContext.putImageData(sourcePixels, 0, 0);
+
+    context.clearRect(0, 0, width, height);
+    context.save();
+    context.translate(width, 0);
+    context.scale(-1, 1);
+    context.drawImage(compositedCanvas, 0, 0, width, height);
+    context.restore();
+
+    hasSegmentedFrameRef.current = true;
+  }, [getOrCreateWorkerCanvas]);
 
   useEffect(() => {
     let mounted = true;
@@ -120,39 +308,159 @@ const CameraCapture: React.FC<Props> = ({ layout, onComplete }) => {
     };
   }, []);
 
-  const captureFrame = useCallback((): string | null => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
+  useEffect(() => {
+    let cancelled = false;
+    let retryTimeoutId: number | null = null;
 
-    if (!video || !canvas || video.videoWidth === 0 || video.videoHeight === 0) {
+    const scheduleRetry = () => {
+      if (cancelled) return;
+      if (segmentationInitAttemptsRef.current >= SEGMENTATION_INIT_MAX_ATTEMPTS) {
+        setIsSegmentationUnavailable(true);
+        return;
+      }
+
+      retryTimeoutId = window.setTimeout(() => {
+        retryTimeoutId = null;
+        void initializeSegmentation();
+      }, SEGMENTATION_INIT_RETRY_MS);
+    };
+
+    const initializeSegmentation = async () => {
+      if (cancelled || selfieSegmentationRef.current) return;
+      const segmenter = new SelfieSegmentation({
+        locateFile: (file) => resolveMediapipeAssetUrl(file),
+      });
+
+      segmenter.setOptions({
+        modelSelection: 0,
+        selfieMode: true,
+      });
+
+      segmenter.onResults(results => {
+        segmentationInFlightRef.current = false;
+        if (cancelled) return;
+        if (!segmentationStatusLockedRef.current) {
+          segmentationStatusLockedRef.current = true;
+          setIsSegmentationActive(true);
+          setIsSegmentationUnavailable(false);
+        }
+        drawSegmentedPreviewFrame(results);
+      });
+
+      try {
+        segmentationInitAttemptsRef.current += 1;
+        await segmenter.initialize();
+        if (cancelled) {
+          await segmenter.close();
+          return;
+        }
+        selfieSegmentationRef.current = segmenter;
+        setSegmentationErrorDetail(null);
+      } catch (segmentationError) {
+        console.error('Person segmentation initialization failed, using fallback preview.', segmentationError);
+        if (!cancelled) {
+          setIsSegmentationActive(false);
+          const message = segmentationError instanceof Error ? segmentationError.message : String(segmentationError);
+          setSegmentationErrorDetail(message);
+          scheduleRetry();
+        }
+      }
+    };
+
+    void initializeSegmentation();
+
+    return () => {
+      cancelled = true;
+      if (retryTimeoutId !== null) {
+        window.clearTimeout(retryTimeoutId);
+      }
+      const segmenter = selfieSegmentationRef.current;
+      selfieSegmentationRef.current = null;
+      segmentationInFlightRef.current = false;
+      hasSegmentedFrameRef.current = false;
+      previousMaskAlphaRef.current = null;
+      previousMaskPixelCountRef.current = 0;
+      segmentationStatusLockedRef.current = false;
+      segmentationInitAttemptsRef.current = 0;
+      setIsSegmentationActive(false);
+      setIsSegmentationUnavailable(false);
+      setSegmentationErrorDetail(null);
+      if (segmenter) {
+        void segmenter.close().catch(() => undefined);
+      }
+    };
+  }, [drawSegmentedPreviewFrame]);
+
+  useEffect(() => {
+    const renderLoop = () => {
+      const video = videoRef.current;
+      const segmenter = selfieSegmentationRef.current;
+
+      if (video && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+        if (segmenter) {
+          if (!segmentationInFlightRef.current) {
+            segmentationInFlightRef.current = true;
+            void segmenter.send({ image: video }).catch(segmentationError => {
+              segmentationInFlightRef.current = false;
+              console.error('Person segmentation frame failed, using fallback preview.', segmentationError);
+              setIsSegmentationActive(false);
+              const message = segmentationError instanceof Error ? segmentationError.message : String(segmentationError);
+              setSegmentationErrorDetail(message);
+            });
+          }
+
+          if (!hasSegmentedFrameRef.current) {
+            drawRawPreviewFrame();
+          }
+        } else {
+          drawRawPreviewFrame();
+        }
+      }
+
+      segmentationLoopIdRef.current = window.requestAnimationFrame(renderLoop);
+    };
+
+    segmentationLoopIdRef.current = window.requestAnimationFrame(renderLoop);
+
+    return () => {
+      if (segmentationLoopIdRef.current !== null) {
+        window.cancelAnimationFrame(segmentationLoopIdRef.current);
+        segmentationLoopIdRef.current = null;
+      }
+    };
+  }, [drawRawPreviewFrame]);
+
+  const captureFrame = useCallback((): string | null => {
+    const sourceCanvas = previewCanvasRef.current;
+    const canvas = captureCanvasRef.current;
+
+    if (!sourceCanvas || !canvas || sourceCanvas.width === 0 || sourceCanvas.height === 0) {
       return null;
     }
 
     const context = canvas.getContext('2d');
     if (!context) return null;
 
-    const videoAspect = video.videoWidth / video.videoHeight;
-    let sourceWidth = video.videoWidth;
-    let sourceHeight = video.videoHeight;
+    const sourceAspect = sourceCanvas.width / sourceCanvas.height;
+    let sourceWidth = sourceCanvas.width;
+    let sourceHeight = sourceCanvas.height;
     let sourceX = 0;
     let sourceY = 0;
 
-    if (videoAspect > targetAspect) {
-      sourceWidth = video.videoHeight * targetAspect;
-      sourceX = (video.videoWidth - sourceWidth) / 2;
+    if (sourceAspect > targetAspect) {
+      sourceWidth = sourceCanvas.height * targetAspect;
+      sourceX = (sourceCanvas.width - sourceWidth) / 2;
     } else {
-      sourceHeight = video.videoWidth / targetAspect;
-      sourceY = (video.videoHeight - sourceHeight) / 2;
+      sourceHeight = sourceCanvas.width / targetAspect;
+      sourceY = (sourceCanvas.height - sourceHeight) / 2;
     }
 
     canvas.width = targetAspect > 1.5 ? 1280 : 960;
     canvas.height = canvas.width / targetAspect;
 
-    context.save();
-    context.translate(canvas.width, 0);
-    context.scale(-1, 1);
+    context.clearRect(0, 0, canvas.width, canvas.height);
     context.drawImage(
-      video,
+      sourceCanvas,
       sourceX,
       sourceY,
       sourceWidth,
@@ -162,7 +470,6 @@ const CameraCapture: React.FC<Props> = ({ layout, onComplete }) => {
       canvas.width,
       canvas.height
     );
-    context.restore();
 
     return canvas.toDataURL('image/jpeg', 0.95);
   }, [targetAspect]);
@@ -304,7 +611,7 @@ const CameraCapture: React.FC<Props> = ({ layout, onComplete }) => {
   }, [captureFrame, captureShotVideo, onComplete, runShotCountdown, stream, targetCount]);
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen relative z-10 w-full classic-gradient p-4">
+    <div className="flex flex-col items-center justify-center min-h-screen relative z-10 w-full classic-gradient camera-surface-white p-4">
       <div className="absolute inset-0 gold-shimmer opacity-20 pointer-events-none" />
 
       {error ? (
@@ -324,9 +631,13 @@ const CameraCapture: React.FC<Props> = ({ layout, onComplete }) => {
             autoPlay
             playsInline
             muted
-            className="w-full h-full object-cover transform -scale-x-100 filter contrast-110 saturate-110"
+            className="absolute inset-0 w-full h-full opacity-0 pointer-events-none"
           />
-          <canvas ref={canvasRef} className="hidden" />
+          <canvas
+            ref={previewCanvasRef}
+            className="w-full h-full object-cover filter contrast-110 saturate-110"
+          />
+          <canvas ref={captureCanvasRef} className="hidden" />
 
           {isFlashing && <div className="absolute inset-0 bg-white z-50 flash-overlay" />}
 
@@ -339,6 +650,24 @@ const CameraCapture: React.FC<Props> = ({ layout, onComplete }) => {
                 <div className="hidden md:block text-amber-200/80 text-sm font-serif italic tracking-wider">
                   Deep Blue Photobooth
                 </div>
+                <div className={`px-3 py-1 rounded-full text-[11px] md:text-xs font-serif border ${
+                  isSegmentationActive
+                    ? 'bg-emerald-950/80 border-emerald-300/40 text-emerald-100'
+                    : isSegmentationUnavailable
+                      ? 'bg-red-950/80 border-red-400/50 text-red-200'
+                      : 'bg-slate-900/70 border-amber-200/20 text-amber-100/80'
+                }`}>
+                  {isSegmentationActive
+                    ? 'AI white background on'
+                    : isSegmentationUnavailable
+                      ? 'AI white background unavailable'
+                      : 'Starting AI white background...'}
+                </div>
+                {isSegmentationUnavailable && segmentationErrorDetail && (
+                  <div className="max-w-[260px] text-right text-[10px] leading-snug text-red-200/90 font-sans">
+                    {segmentationErrorDetail}
+                  </div>
+                )}
                 {shouldRecordVideo && (
                   <div className={`px-3 py-1 rounded-full text-[11px] md:text-xs font-serif border flex items-center gap-1 ${
                     isRecordingVideo
