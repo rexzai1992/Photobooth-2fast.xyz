@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { getGallery, deletePhotoFromGallery, clearGallery, SavedPhoto, GalleryResult } from '../utils/storage';
-import { ArrowLeft, Trash2, Download, Image as ImageIcon, Lock, Sticker as StickerIcon, ChevronLeft, ChevronRight, Send, Upload, CheckCircle, XCircle, Clock, MessageSquare, Archive, Circle } from 'lucide-react';
+import { getGallery, getVideoGallery, deletePhotoFromGallery, clearGallery, SavedPhoto, GalleryResult } from '../utils/storage';
+import { ArrowLeft, Trash2, Download, Image as ImageIcon, Lock, Sticker as StickerIcon, ChevronLeft, ChevronRight, Send, Upload, CheckCircle, XCircle, Clock, MessageSquare, Archive, Circle, Video } from 'lucide-react';
 import { StickerUpload } from './StickerUpload';
 import { getCustomStickers, CustomSticker } from '../utils/stickerStorage';
 import { supabase } from '../utils/supabase';
+import { getAdminPin, setAdminPin, verifyAdminPin } from '../utils/r2Storage';
 
 interface Props {
   onBack: () => void;
@@ -30,6 +31,10 @@ const getFileExtensionFromMimeType = (mimeType: string): string => {
   if (normalized.includes('png')) return 'png';
   if (normalized.includes('webp')) return 'webp';
   if (normalized.includes('gif')) return 'gif';
+  if (normalized.includes('webm')) return 'webm';
+  if (normalized.includes('mp4')) return 'mp4';
+  if (normalized.includes('quicktime')) return 'mov';
+  if (normalized.includes('ogg')) return 'ogv';
   if (normalized.includes('jpeg') || normalized.includes('jpg')) return 'jpg';
   return 'jpg';
 };
@@ -38,8 +43,12 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [pin, setPin] = useState('');
   const [photos, setPhotos] = useState<SavedPhoto[]>([]);
+  const [videos, setVideos] = useState<SavedPhoto[]>([]);
+  const [videoTotal, setVideoTotal] = useState(0);
+  const [loadingVideos, setLoadingVideos] = useState(false);
+  const [videoLayouts, setVideoLayouts] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<'photos' | 'stickers' | 'whatsapp'>('photos');
+  const [activeTab, setActiveTab] = useState<'photos' | 'videos' | 'stickers' | 'whatsapp'>('photos');
   const [customStickers, setCustomStickers] = useState<CustomSticker[]>([]);
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const [selectedPhoto, setSelectedPhoto] = useState<SavedPhoto | null>(null);
@@ -96,11 +105,13 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
   }, [selectedPhoto]);
 
   // Authentication Logic
-  const handlePinSubmit = (e: React.FormEvent) => {
+  const handlePinSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (pin === '1234') {
+    if (await verifyAdminPin(pin)) {
+        setAdminPin(pin);
         setIsAuthenticated(true);
         loadPhotos();
+        loadVideos();
         loadCustomStickers();
         setConfig({ api_key: 'configured', sender_number: '601116366799' });
         loadSentMessages();
@@ -133,6 +144,28 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
   const loadCustomStickers = async () => {
     const stickers = await getCustomStickers();
     setCustomStickers(stickers);
+  };
+
+  const loadVideos = async () => {
+    setLoadingVideos(true);
+    try {
+      const result = await getVideoGallery(100);
+      setVideos(result.videos);
+      setVideoTotal(result.total);
+    } catch (videoError) {
+      console.error('Error loading saved videos:', videoError);
+      setVideos([]);
+      setVideoTotal(0);
+    } finally {
+      setLoadingVideos(false);
+    }
+  };
+
+  const handleDeleteVideo = async (video: SavedPhoto) => {
+    if (!confirm('Are you sure you want to delete this saved video?')) return;
+    await deletePhotoFromGallery(video.id);
+    setVideos(current => current.filter(item => item.id !== video.id));
+    setVideoTotal(current => Math.max(0, current - 1));
   };
 
   const handleDelete = async (id: string) => {
@@ -307,9 +340,10 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
     try {
       setLoadingGallery(true);
       const result = await getGallery(1, 100);
+      const imagePhotos = result.photos.filter(photo => !photo.isVideo);
       const filteredPhotos = filterWithPhone
-        ? result.photos.filter(p => p.phoneNumber)
-        : result.photos;
+        ? imagePhotos.filter(photo => photo.phoneNumber)
+        : imagePhotos;
       setGalleryPhotos(filteredPhotos);
     } catch (err) {
       console.error('Error loading gallery:', err);
@@ -360,7 +394,7 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
         {
           method: 'POST',
           headers: {
-            'X-Admin-Pin': '1234',
+            'X-Admin-Pin': getAdminPin(),
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -456,7 +490,7 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
              </a>
              {activeTab === 'photos' && (
                <>
-                 <span className="hidden sm:inline">{photos.length} Photos Loaded</span>
+                 <span className="hidden sm:inline">{photos.length} Media Items Loaded</span>
                  <span className="sm:hidden">{photos.length} Items</span>
                  {selectedPhotoIds.length > 0 && (
                    <span className="hidden sm:inline text-amber-200 font-semibold">
@@ -490,6 +524,15 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
                  </button>
                </>
              )}
+             {activeTab === 'videos' && (
+               <>
+                 <span className="hidden sm:inline">
+                   {videoTotal} Twin Strips Videos
+                   {videoTotal > videos.length ? ` • Latest ${videos.length} shown` : ''}
+                 </span>
+                 <span className="sm:hidden">{videoTotal} Strips</span>
+               </>
+             )}
              {activeTab === 'stickers' && (
                <>
                  <span className="hidden sm:inline">{customStickers.length} Custom Stickers</span>
@@ -516,6 +559,19 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
             }`}
           >
             <ImageIcon size={14} /> Photos
+          </button>
+          <button
+            onClick={() => {
+              setActiveTab('videos');
+              void loadVideos();
+            }}
+            className={`flex-1 py-3 text-center text-xs md:text-sm uppercase tracking-widest font-serif transition-all flex items-center justify-center gap-2 ${
+              activeTab === 'videos'
+                ? 'text-amber-200 border-b-2 border-amber-200 bg-white/5'
+                : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'
+            }`}
+          >
+            <Video size={14} /> Strip Videos
           </button>
           <button
             onClick={() => setActiveTab('stickers')}
@@ -553,7 +609,7 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
                 <div className="p-6 rounded-full bg-slate-900">
                   <ImageIcon size={48} />
                 </div>
-                <p className="text-lg md:text-xl font-light">No photos generated yet.</p>
+                <p className="text-lg md:text-xl font-light">No photos or videos generated yet.</p>
               </div>
             ) : (
               <>
@@ -575,11 +631,26 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
 	                          setCurrentPhotoIndex(index);
 	                        }}
 	                      >
-                        <img
-                          src={photo.dataUrl}
-                          alt={`Photo ${index + 1}`}
-                          className="w-full h-full object-cover"
-	                        />
+                        {photo.isVideo ? (
+                          <video
+                            src={photo.dataUrl}
+                            muted
+                            playsInline
+                            preload="metadata"
+                            className="w-full h-full object-contain bg-white"
+                          />
+                        ) : (
+                          <img
+                            src={photo.dataUrl}
+                            alt={`Photo ${index + 1}`}
+                            className="w-full h-full object-cover"
+                          />
+                        )}
+                        {photo.isVideo && (
+                          <div className="absolute top-2 left-2 z-10 rounded-full bg-slate-950/80 p-2 text-amber-200">
+                            <Video size={16} />
+                          </div>
+                        )}
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
@@ -597,7 +668,7 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
 	                        <div className="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
 	                          <div className="absolute bottom-0 left-0 right-0 p-3 text-xs">
 	                            <div className="text-amber-200 font-serif mb-1">
-	                              Photo #{photo.id.slice(-8)}
+	                              {photo.isVideo ? 'Video' : 'Photo'} #{photo.id.slice(-8)}
                             </div>
                             <div className="text-slate-400 text-xs">
                               {new Date(photo.timestamp).toLocaleDateString()}
@@ -652,7 +723,9 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
                         <div className="p-4 md:p-6 bg-slate-900 border-b border-white/10">
                           <div className="flex items-center justify-between mb-3">
                             <div className="text-slate-400 text-xs md:text-sm font-mono">
-                              <div>Photo #{photos[currentPhotoIndex]?.id.slice(-8)}</div>
+                              <div>
+                                {photos[currentPhotoIndex]?.isVideo ? 'Video' : 'Photo'} #{photos[currentPhotoIndex]?.id.slice(-8)}
+                              </div>
                               <div className="text-slate-500 text-xs mt-1">
                                 {new Date(photos[currentPhotoIndex]?.timestamp).toLocaleString()}
                               </div>
@@ -695,11 +768,22 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
                           onTouchMove={handleTouchMove}
                           onTouchEnd={handleTouchEnd}
                         >
-                          <img
-                            src={photos[currentPhotoIndex]?.dataUrl}
-                            alt="Photo"
-                            className="w-full h-full object-contain bg-slate-950"
-                          />
+                          {photos[currentPhotoIndex]?.isVideo ? (
+                            <video
+                              src={photos[currentPhotoIndex]?.dataUrl}
+                              controls
+                              autoPlay
+                              muted
+                              playsInline
+                              className="w-full h-full object-contain bg-slate-950"
+                            />
+                          ) : (
+                            <img
+                              src={photos[currentPhotoIndex]?.dataUrl}
+                              alt="Photo"
+                              className="w-full h-full object-contain bg-slate-950"
+                            />
+                          )}
                         </div>
                       </div>
 
@@ -758,11 +842,21 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
                                   : 'border-white/30 opacity-50 hover:opacity-75'
                               }`}
                             >
-                              <img
-                                src={photo.dataUrl}
-                                alt={`Thumbnail`}
-                                className="w-full h-full object-cover"
-                              />
+                              {photo.isVideo ? (
+                                <video
+                                  src={photo.dataUrl}
+                                  muted
+                                  playsInline
+                                  preload="metadata"
+                                  className="w-full h-full object-contain bg-white"
+                                />
+                              ) : (
+                                <img
+                                  src={photo.dataUrl}
+                                  alt="Thumbnail"
+                                  className="w-full h-full object-cover"
+                                />
+                              )}
                             </button>
                           ))}
                         </div>
@@ -784,6 +878,98 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
               </>
             )}
           </>
+        )}
+
+        {activeTab === 'videos' && (
+          <div className="p-4 md:p-6 pb-20">
+            {loadingVideos ? (
+              <div className="min-h-[40vh] flex items-center justify-center text-amber-200 animate-pulse">
+                Loading Saved Videos...
+              </div>
+            ) : videos.length === 0 ? (
+              <div className="min-h-[40vh] flex flex-col items-center justify-center text-slate-600 gap-4">
+                <div className="p-6 rounded-full bg-slate-900">
+                  <Video size={48} />
+                </div>
+                <p className="text-lg md:text-xl font-light">No Twin Strips videos saved yet.</p>
+              </div>
+            ) : (
+              <>
+                <div className="mb-5 rounded-xl border border-amber-200/15 bg-slate-900/60 px-4 py-3 text-sm text-slate-400">
+                  Only Twin Strips videos are shown here. Portrait and older untagged videos stay out
+                  of this view so they do not appear as unwanted strip entries.
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+                  {videos.map(video => (
+                    <article
+                      key={video.id}
+                      className="overflow-hidden rounded-xl border border-white/10 bg-slate-900 shadow-lg"
+                    >
+                      <div className="relative aspect-[2/3] bg-black">
+                        <video
+                          src={video.dataUrl}
+                          controls
+                          muted
+                          playsInline
+                          preload="metadata"
+                          className="h-full w-full object-contain"
+                          onLoadedMetadata={(event) => {
+                            const element = event.currentTarget;
+                            const layoutLabel =
+                              element.videoWidth === 540 && element.videoHeight === 810
+                                ? 'Twin Strips'
+                                : element.videoWidth === 960 && element.videoHeight === 1440
+                                  ? 'Portrait'
+                                  : 'Saved Video';
+                            setVideoLayouts(current =>
+                              current[video.id] === layoutLabel
+                                ? current
+                                : { ...current, [video.id]: layoutLabel }
+                            );
+                          }}
+                        />
+                        <div className="pointer-events-none absolute left-3 top-3 rounded-full border border-amber-200/25 bg-slate-950/85 px-3 py-1 text-xs font-serif text-amber-100">
+                          {videoLayouts[video.id] || 'Saved Video'}
+                        </div>
+                      </div>
+                      <div className="space-y-3 p-4">
+                        <div>
+                          <div className="text-sm font-serif text-amber-100">
+                            {videoLayouts[video.id] || 'Saved Video'}
+                          </div>
+                          <div className="mt-1 text-xs text-slate-500">
+                            {new Date(video.timestamp).toLocaleString()}
+                          </div>
+                          {video.sessionId && (
+                            <div className="mt-1 truncate font-mono text-[10px] text-slate-600">
+                              Session {video.sessionId}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => void handleDownload(video)}
+                            className="flex-1 rounded-lg bg-amber-200 px-3 py-2 text-sm font-semibold text-slate-950 transition-colors hover:bg-white"
+                          >
+                            <span className="inline-flex items-center gap-2">
+                              <Download size={14} /> Download
+                            </span>
+                          </button>
+                          <button
+                            onClick={() => void handleDeleteVideo(video)}
+                            className="rounded-lg border border-red-500/50 px-3 py-2 text-red-300 transition-colors hover:bg-red-500/10"
+                            aria-label="Delete saved video"
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
         )}
 
         {activeTab === 'stickers' && (
@@ -880,9 +1066,10 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
                                   setLoadingGallery(true);
                                   try {
                                     const result = await getGallery(1, 100);
+                                    const imagePhotos = result.photos.filter(photo => !photo.isVideo);
                                     const filteredPhotos = e.target.checked
-                                      ? result.photos.filter(p => p.phoneNumber)
-                                      : result.photos;
+                                      ? imagePhotos.filter(photo => photo.phoneNumber)
+                                      : imagePhotos;
                                     setGalleryPhotos(filteredPhotos);
                                   } catch (err) {
                                     console.error('Error loading gallery:', err);

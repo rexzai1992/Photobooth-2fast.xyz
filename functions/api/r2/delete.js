@@ -1,3 +1,5 @@
+// Delete R2 objects. Admin PIN required, except the booth may remove its own stale
+// preview-video variants (photos/<uuid>-preview-video[-layout].<ext>).
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
@@ -5,11 +7,19 @@ const json = (body, status = 200) =>
       'content-type': 'application/json',
       'access-control-allow-origin': '*',
       'access-control-allow-methods': 'POST, OPTIONS',
-      'access-control-allow-headers': 'content-type'
+      'access-control-allow-headers': 'content-type, x-admin-pin'
     }
   });
 
 const resolveBucket = (env) => env.MEDIA_BUCKET || env.R2_BUCKET || env.PHOTOS_BUCKET;
+
+const isAdmin = (request, env) => {
+  const expected = (env.ADMIN_PIN || '').trim();
+  const provided = (request.headers.get('x-admin-pin') || '').trim();
+  return Boolean(expected) && provided === expected;
+};
+
+const BOOTH_DELETABLE = /^photos\/[0-9a-f-]{36}-preview-video(?:-[a-z]+)?\.(webm|mp4|mov|ogv)$/i;
 
 const normalizeKeys = (keys) =>
   Array.from(
@@ -34,6 +44,10 @@ export const onRequestPost = async ({ request, env }) => {
 
     if (keys.length === 0) {
       return json({ success: false, error: 'No valid keys provided' }, 400);
+    }
+
+    if (!isAdmin(request, env) && !keys.every((key) => BOOTH_DELETABLE.test(key))) {
+      return json({ success: false, error: 'Admin PIN required' }, 401);
     }
 
     await Promise.all(keys.map((key) => bucket.delete(key)));

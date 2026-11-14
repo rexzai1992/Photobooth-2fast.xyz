@@ -179,9 +179,7 @@ export const onRequestGet = async ({ request, env }) => {
     const headers = new Headers();
     object.writeHttpMetadata(headers);
     headers.set('etag', object.httpEtag);
-    if (!headers.has('cache-control')) {
-      headers.set('cache-control', 'public, max-age=31536000, immutable');
-    }
+    headers.set('cache-control', 'public, max-age=0, must-revalidate');
 
     const contentType = (headers.get('content-type') || '').toLowerCase();
     const shouldProbeMime =

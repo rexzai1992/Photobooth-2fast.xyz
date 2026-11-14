@@ -1,6 +1,6 @@
 import { supabase } from './supabase';
 import { compressImage } from './imageCompression';
-import { deleteR2Keys, getPhotoDeliveryUrl, uploadBlobToR2 } from './r2Storage';
+import { deleteR2Keys, getPhotoDeliveryUrl, listR2Objects, listR2VideoObjects, setR2PhotoPhone, uploadBlobToR2 } from './r2Storage';
 
 export interface SavedPhoto {
   id: string;
@@ -12,6 +12,48 @@ export interface SavedPhoto {
   slotIndex?: number | null;
   sessionId?: string | null;
 }
+
+export interface VideoGalleryResult {
+  videos: SavedPhoto[];
+  total: number;
+}
+
+const PREVIEW_VIDEO_EXTENSIONS = ['webm', 'mp4', 'mov', 'ogv'] as const;
+const PREVIEW_VIDEO_OBJECT_PATTERN = /-preview-video(?:-(?:portrait|strips))?\.(webm|mp4|mov|ogv)$/i;
+const STRIP_PREVIEW_VIDEO_OBJECT_PATTERN = /-preview-video-strips\.(webm|mp4|mov|ogv)$/i;
+
+export const getPhotoPreviewVideoStorageKeys = (photoId: string): string[] =>
+  PREVIEW_VIDEO_EXTENSIONS.flatMap(extension => [
+    `photos/${photoId}-preview-video.${extension}`,
+    `photos/${photoId}-preview-video-portrait.${extension}`,
+    `photos/${photoId}-preview-video-strips.${extension}`
+  ]);
+
+export const getVideoGallery = async (limit: number = 100): Promise<VideoGalleryResult> => {
+  const r2Videos = await listR2VideoObjects();
+  const previewVideos = r2Videos
+    .filter(video => STRIP_PREVIEW_VIDEO_OBJECT_PATTERN.test(video.key))
+    .sort((left, right) => right.uploadedAt - left.uploadedAt);
+
+  return {
+    videos: previewVideos.slice(0, limit).map(video => {
+      const deliveryUrl = getPhotoDeliveryUrl(video.key);
+      const photoToken = video.key.match(
+        /photos\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})-preview-video-strips\./i
+      )?.[1];
+
+      return {
+        id: `r2:${encodeURIComponent(video.key)}`,
+        timestamp: Number.isFinite(video.uploadedAt) ? video.uploadedAt : Date.now(),
+        dataUrl: deliveryUrl,
+        fullSizeUrl: deliveryUrl,
+        isVideo: true,
+        sessionId: photoToken || null
+      };
+    }),
+    total: previewVideos.length
+  };
+};
 
 const dataUrlToBlob = (dataUrl: string): Blob => {
   const arr = dataUrl.split(',');
@@ -39,93 +81,90 @@ const getFileExtensionFromMimeType = (mimeType: string): string => {
   return 'bin';
 };
 
-export const updatePhotoPhoneNumber = async (photoId: string, phoneNumber: string): Promise<void> => {
+/* ------------------------------------------------------------------------------------------
+ * R2 is the source of truth. The old Supabase "photos" table is only written "best effort":
+ * if Supabase is down (it was shut down in Oct 2026) photos are still kept in R2 and shown in admin.
+ * ---------------------------------------------------------------------------------------- */
+const SUPABASE_TIMEOUT_MS = 4000;
+
+const bestEffortSupabase = async (label: string, run: () => PromiseLike<{ error: unknown }>): Promise<void> => {
   try {
-    const { error } = await supabase
-      .from('photos')
-      .update({ phone_number: phoneNumber })
-      .eq('id', photoId);
-
-    if (error) {
-      console.error("Error updating photo phone number:", error);
-      throw error;
+    const result = await Promise.race([
+      Promise.resolve(run()),
+      new Promise<{ error: unknown }>(resolve =>
+        setTimeout(() => resolve({ error: new Error('timeout') }), SUPABASE_TIMEOUT_MS)
+      )
+    ]);
+    if (result?.error) {
+      console.warn(`[optional] Supabase ${label} skipped:`, result.error);
     }
-
-    console.log('Photo phone number updated successfully');
-  } catch (e) {
-    console.error("Error updating photo phone number:", e);
-    throw e;
+  } catch (error) {
+    console.warn(`[optional] Supabase ${label} skipped:`, error);
   }
 };
 
-export const savePhotoToGallery = async (dataUrl: string, phoneNumber?: string): Promise<string> => {
+const photoKeys = (photoId: string) => ({
+  full: `photos/${photoId}-full.jpg`,
+  preview: `photos/${photoId}-preview.jpg`
+});
+
+export const updatePhotoPhoneNumber = async (photoId: string, phoneNumber: string): Promise<void> => {
+  const keys = photoKeys(photoId);
+  await setR2PhotoPhone([keys.full, keys.preview], phoneNumber);
+  await bestEffortSupabase('phone update', () =>
+    supabase.from('photos').update({ phone_number: phoneNumber }).eq('id', photoId)
+  );
+  console.log('Photo phone number updated');
+};
+
+export const savePhotoToGallery = async (
+  dataUrl: string,
+  phoneNumber?: string,
+  existingPhotoId?: string
+): Promise<string> => {
+  const photoId = existingPhotoId || crypto.randomUUID();
+  const isOverwrite = Boolean(existingPhotoId);
+  const { full: fullStoragePath, preview: previewStoragePath } = photoKeys(photoId);
+
+  let compressedPreview = dataUrl;
   try {
-    const photoId = crypto.randomUUID();
-    const fullFileName = `${photoId}-full.jpg`;
-    const previewFileName = `${photoId}-preview.jpg`;
-    const fullStoragePath = `photos/${fullFileName}`;
-    const previewStoragePath = `photos/${previewFileName}`;
-
-    let compressedPreview = dataUrl;
-    try {
-      compressedPreview = await compressImage(dataUrl, 800, 0.7);
-    } catch (compressionError) {
-      console.warn('Preview compression failed, using original image data for preview.', compressionError);
-    }
-
-    const fullBlob = dataUrlToBlob(dataUrl);
-    const previewBlob = dataUrlToBlob(compressedPreview);
-    let uploadedToR2 = false;
-
-    try {
-      await Promise.all([
-        uploadBlobToR2(fullStoragePath, fullBlob, 'image/jpeg'),
-        uploadBlobToR2(previewStoragePath, previewBlob, 'image/jpeg')
-      ]);
-      uploadedToR2 = true;
-    } catch (uploadError) {
-      console.warn('R2 upload failed, saving photo with legacy image_data fallback.', uploadError);
-      await deleteR2Keys([fullStoragePath, previewStoragePath]).catch(() => undefined);
-    }
-
-    const insertPayload = uploadedToR2
-      ? {
-          id: photoId,
-          storage_path: fullStoragePath,
-          preview_path: previewStoragePath,
-          image_data: null,
-          phone_number: phoneNumber || null
-        }
-      : {
-          id: photoId,
-          storage_path: null,
-          preview_path: null,
-          image_data: dataUrl,
-          phone_number: phoneNumber || null
-        };
-
-    const { error: dbError } = await supabase
-      .from('photos')
-      .insert(insertPayload);
-
-    if (dbError) {
-      console.error("Error saving photo metadata to database:", dbError);
-      if (uploadedToR2) {
-        await deleteR2Keys([fullStoragePath, previewStoragePath]).catch(() => undefined);
-      }
-      throw dbError;
-    }
-
-    if (uploadedToR2) {
-      console.log('Photo and preview saved to R2');
-    } else {
-      console.log('Photo saved with legacy image_data fallback');
-    }
-    return photoId;
-  } catch (e) {
-    console.error("Error saving photo:", e);
-    throw e;
+    compressedPreview = await compressImage(dataUrl, 800, 0.7);
+  } catch (compressionError) {
+    console.warn('Preview compression failed, using original image data for preview.', compressionError);
   }
+
+  const fullBlob = dataUrlToBlob(dataUrl);
+  const previewBlob = dataUrlToBlob(compressedPreview);
+
+  // Upload to R2. If this fails we throw (nothing was saved) - but we NEVER delete a photo
+  // that reached R2 just because the database is unavailable.
+  await Promise.all([
+    uploadBlobToR2(fullStoragePath, fullBlob, 'image/jpeg', phoneNumber),
+    uploadBlobToR2(previewStoragePath, previewBlob, 'image/jpeg', phoneNumber)
+  ]);
+
+  if (isOverwrite) {
+    await bestEffortSupabase('overwrite phone', () =>
+      phoneNumber
+        ? supabase.from('photos').update({ phone_number: phoneNumber }).eq('id', photoId)
+        : Promise.resolve({ error: null })
+    );
+    console.log('Existing photo and preview overwritten in R2');
+    return photoId;
+  }
+
+  await bestEffortSupabase('insert', () =>
+    supabase.from('photos').insert({
+      id: photoId,
+      storage_path: fullStoragePath,
+      preview_path: previewStoragePath,
+      image_data: null,
+      phone_number: phoneNumber || null
+    })
+  );
+
+  console.log('Photo and preview saved to R2');
+  return photoId;
 };
 
 export const saveCaptureLayersToGallery = async (
@@ -133,81 +172,60 @@ export const saveCaptureLayersToGallery = async (
   videoLayers: string[],
   phoneNumber?: string
 ): Promise<string> => {
-  try {
-    const sessionId = crypto.randomUUID();
+  const sessionId = crypto.randomUUID();
 
-    for (const [index, photoLayer] of photoLayers.entries()) {
-      const photoId = crypto.randomUUID();
-      const fullFileName = `${photoId}-layer-${index + 1}-full.jpg`;
-      const previewFileName = `${photoId}-layer-${index + 1}-preview.jpg`;
-      const fullStoragePath = `photos/${fullFileName}`;
-      const previewStoragePath = `photos/${previewFileName}`;
+  for (const [index, photoLayer] of photoLayers.entries()) {
+    const photoId = crypto.randomUUID();
+    const fullStoragePath = `photos/${photoId}-layer-${index + 1}-full.jpg`;
+    const previewStoragePath = `photos/${photoId}-layer-${index + 1}-preview.jpg`;
 
-      const compressedPreview = await compressImage(photoLayer, 800, 0.7);
-      const fullBlob = dataUrlToBlob(photoLayer);
-      const previewBlob = dataUrlToBlob(compressedPreview);
-
-      try {
-        await Promise.all([
-          uploadBlobToR2(fullStoragePath, fullBlob, 'image/jpeg'),
-          uploadBlobToR2(previewStoragePath, previewBlob, 'image/jpeg')
-        ]);
-      } catch (uploadError) {
-        await deleteR2Keys([fullStoragePath, previewStoragePath]).catch(() => undefined);
-        throw uploadError;
-      }
-
-      const { error: dbError } = await supabase
-        .from('photos')
-        .insert({
-          id: photoId,
-          storage_path: fullStoragePath,
-          preview_path: previewStoragePath,
-          phone_number: phoneNumber || null,
-          is_video: false,
-          slot_index: index,
-          session_id: sessionId
-        });
-
-      if (dbError) {
-        await deleteR2Keys([fullStoragePath, previewStoragePath]).catch(() => undefined);
-        throw dbError;
-      }
+    let compressedPreview = photoLayer;
+    try {
+      compressedPreview = await compressImage(photoLayer, 800, 0.7);
+    } catch {
+      // use original
     }
 
-    for (const [index, videoLayer] of videoLayers.entries()) {
-      const videoId = crypto.randomUUID();
-      const mimeType = getDataUrlMimeType(videoLayer, 'video/webm');
-      const extension = getFileExtensionFromMimeType(mimeType);
-      const videoFileName = `${videoId}-layer-${index + 1}.${extension}`;
-      const videoStoragePath = `photos/${videoFileName}`;
-      const videoBlob = dataUrlToBlob(videoLayer);
+    await Promise.all([
+      uploadBlobToR2(fullStoragePath, dataUrlToBlob(photoLayer), 'image/jpeg', phoneNumber),
+      uploadBlobToR2(previewStoragePath, dataUrlToBlob(compressedPreview), 'image/jpeg', phoneNumber)
+    ]);
 
-      await uploadBlobToR2(videoStoragePath, videoBlob, mimeType);
-
-      const { error: dbError } = await supabase
-        .from('photos')
-        .insert({
-          id: videoId,
-          storage_path: videoStoragePath,
-          preview_path: null,
-          phone_number: phoneNumber || null,
-          is_video: true,
-          slot_index: index,
-          session_id: sessionId
-        });
-
-      if (dbError) {
-        await deleteR2Keys([videoStoragePath]).catch(() => undefined);
-        throw dbError;
-      }
-    }
-
-    return sessionId;
-  } catch (e) {
-    console.error("Error saving capture layers:", e);
-    throw e;
+    await bestEffortSupabase('layer insert', () =>
+      supabase.from('photos').insert({
+        id: photoId,
+        storage_path: fullStoragePath,
+        preview_path: previewStoragePath,
+        phone_number: phoneNumber || null,
+        is_video: false,
+        slot_index: index,
+        session_id: sessionId
+      })
+    );
   }
+
+  for (const [index, videoLayer] of videoLayers.entries()) {
+    const videoId = crypto.randomUUID();
+    const mimeType = getDataUrlMimeType(videoLayer, 'video/webm');
+    const extension = getFileExtensionFromMimeType(mimeType);
+    const videoStoragePath = `photos/${videoId}-layer-${index + 1}.${extension}`;
+
+    await uploadBlobToR2(videoStoragePath, dataUrlToBlob(videoLayer), mimeType, phoneNumber);
+
+    await bestEffortSupabase('video layer insert', () =>
+      supabase.from('photos').insert({
+        id: videoId,
+        storage_path: videoStoragePath,
+        preview_path: null,
+        phone_number: phoneNumber || null,
+        is_video: true,
+        slot_index: index,
+        session_id: sessionId
+      })
+    );
+  }
+
+  return sessionId;
 };
 
 export interface GalleryResult {
@@ -218,200 +236,124 @@ export interface GalleryResult {
   totalPages: number;
 }
 
-export const getTotalPhotoCount = async (): Promise<number> => {
-  try {
-    const { count, error } = await supabase
-      .from('photos')
-      .select('*', { count: 'exact', head: true });
+// photos/<uuid>[-layer-N]-(full|preview).jpg
+const PHOTO_OBJECT_PATTERN = /^photos\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-layer-(\d+))?)-(full|preview)\.(?:jpe?g|png|webp)$/i;
 
-    if (error) {
-      console.error("Error getting photo count:", error);
-      return 0;
+const buildR2Gallery = async (): Promise<SavedPhoto[]> => {
+  const objects = await listR2Objects('all');
+
+  const groups = new Map<string, { full?: string; preview?: string; uploadedAt: number; phone?: string | null; layer?: number }>();
+  const videoItems: SavedPhoto[] = [];
+
+  for (const object of objects) {
+    const match = object.key.match(PHOTO_OBJECT_PATTERN);
+    if (match) {
+      const [, id, layer, kind] = match;
+      const group = groups.get(id) || { uploadedAt: object.uploadedAt, layer: layer ? Number(layer) : undefined };
+      if (kind.toLowerCase() === 'full') group.full = object.key;
+      else group.preview = object.key;
+      group.uploadedAt = Math.max(group.uploadedAt || 0, object.uploadedAt || 0);
+      group.phone = group.phone || object.phone || null;
+      groups.set(id, group);
+      continue;
     }
 
-    return count || 0;
+    // stand-alone recorded videos (not the per-photo preview videos, which belong to a photo)
+    if (/\.(webm|mp4|mov|ogv)$/i.test(object.key) && !PREVIEW_VIDEO_OBJECT_PATTERN.test(object.key)) {
+      const sessionId = object.key.match(
+        /([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/i
+      )?.[1] || null;
+      const deliveryUrl = getPhotoDeliveryUrl(object.key);
+      videoItems.push({
+        id: `r2:${encodeURIComponent(object.key)}`,
+        timestamp: Number.isFinite(object.uploadedAt) ? object.uploadedAt : Date.now(),
+        dataUrl: deliveryUrl,
+        fullSizeUrl: deliveryUrl,
+        phoneNumber: object.phone || undefined,
+        isVideo: true,
+        slotIndex: null,
+        sessionId
+      });
+    }
+  }
+
+  const photoItems: SavedPhoto[] = [];
+  for (const [id, group] of groups) {
+    const fullKey = group.full || group.preview;
+    const previewKey = group.preview || group.full;
+    if (!fullKey || !previewKey) continue;
+    photoItems.push({
+      id,
+      timestamp: Number.isFinite(group.uploadedAt) ? group.uploadedAt : Date.now(),
+      dataUrl: getPhotoDeliveryUrl(previewKey),
+      fullSizeUrl: getPhotoDeliveryUrl(fullKey),
+      phoneNumber: group.phone || undefined,
+      isVideo: false,
+      slotIndex: group.layer ? group.layer - 1 : null,
+      sessionId: null
+    });
+  }
+
+  return [...photoItems, ...videoItems].sort((left, right) => right.timestamp - left.timestamp);
+};
+
+export const getTotalPhotoCount = async (): Promise<number> => {
+  try {
+    return (await buildR2Gallery()).length;
   } catch (e) {
-    console.error("Error getting photo count:", e);
+    console.error('Error getting photo count:', e);
     return 0;
   }
 };
 
 export const getGallery = async (page: number = 1, pageSize: number = 30): Promise<GalleryResult> => {
   try {
+    const all = await buildR2Gallery();
     const offset = (page - 1) * pageSize;
-
-    const [countResult, scopedPhotosResult] = await Promise.all([
-      getTotalPhotoCount(),
-      supabase
-        .from('photos')
-        .select('id, storage_path, preview_path, created_at, phone_number, is_video, slot_index, session_id')
-        .eq('is_video', false)
-        .order('created_at', { ascending: false })
-        .range(offset, offset + pageSize - 1)
-    ]);
-
-    const photosResult = scopedPhotosResult.error && scopedPhotosResult.error.message?.includes('is_video')
-      ? await supabase
-          .from('photos')
-          .select('id, storage_path, preview_path, created_at, phone_number')
-          .order('created_at', { ascending: false })
-          .range(offset, offset + pageSize - 1)
-      : scopedPhotosResult;
-
-    const total = countResult;
-    const { data, error } = photosResult;
-
-    if (error) {
-      console.error("Error fetching gallery:", error);
-      return {
-        photos: [],
-        total: 0,
-        page,
-        pageSize,
-        totalPages: 0
-      };
-    }
-
-    if (!data) {
-      return {
-        photos: [],
-        total,
-        page,
-        pageSize,
-        totalPages: Math.ceil(total / pageSize)
-      };
-    }
-
-    const legacyPhotoIds = data
-      .filter(photo => !photo.storage_path && !photo.preview_path)
-      .map(photo => photo.id);
-
-    let legacyPhotosData: { [key: string]: string } = {};
-
-    if (legacyPhotoIds.length > 0) {
-      const { data: legacyData, error: legacyError } = await supabase
-        .from('photos')
-        .select('id, image_data')
-        .in('id', legacyPhotoIds);
-
-      if (!legacyError && legacyData) {
-        legacyPhotosData = legacyData.reduce((acc, photo) => {
-          if (photo.image_data) {
-            acc[photo.id] = photo.image_data;
-          }
-          return acc;
-        }, {} as { [key: string]: string });
-      }
-    }
-
-    const photosWithUrls = data.map((photo) => {
-      let dataUrl = '';
-      let fullSizeUrl = '';
-
-      if (photo.preview_path && photo.storage_path) {
-        dataUrl = getPhotoDeliveryUrl(photo.preview_path);
-        fullSizeUrl = getPhotoDeliveryUrl(photo.storage_path);
-      } else if (photo.storage_path) {
-        dataUrl = getPhotoDeliveryUrl(photo.storage_path);
-        fullSizeUrl = getPhotoDeliveryUrl(photo.storage_path);
-      } else if (legacyPhotosData[photo.id]) {
-        dataUrl = legacyPhotosData[photo.id];
-        fullSizeUrl = legacyPhotosData[photo.id];
-      }
-
-      return {
-        id: photo.id,
-        timestamp: new Date(photo.created_at).getTime(),
-        dataUrl,
-        fullSizeUrl,
-        phoneNumber: photo.phone_number || undefined,
-        isVideo: 'is_video' in photo ? (photo as { is_video?: boolean }).is_video : false,
-        slotIndex: 'slot_index' in photo ? (photo as { slot_index?: number | null }).slot_index ?? null : null,
-        sessionId: 'session_id' in photo ? (photo as { session_id?: string | null }).session_id ?? null : null
-      };
-    });
-
     return {
-      photos: photosWithUrls,
-      total,
+      photos: all.slice(offset, offset + pageSize),
+      total: all.length,
       page,
       pageSize,
-      totalPages: Math.ceil(total / pageSize)
+      totalPages: Math.ceil(all.length / pageSize)
     };
   } catch (e) {
-    console.error("Error fetching gallery:", e);
-    return {
-      photos: [],
-      total: 0,
-      page,
-      pageSize,
-      totalPages: 0
-    };
+    console.error('Error fetching gallery:', e);
+    return { photos: [], total: 0, page, pageSize, totalPages: 0 };
   }
 };
 
 export const deletePhotoFromGallery = async (id: string): Promise<void> => {
   try {
-    const { data: photo } = await supabase
-      .from('photos')
-      .select('storage_path, preview_path')
-      .eq('id', id)
-      .maybeSingle();
-
-    if (photo) {
-      const filesToDelete: string[] = [];
-      if (photo.storage_path) {
-        filesToDelete.push(photo.storage_path);
-      }
-      if (photo.preview_path) {
-        filesToDelete.push(photo.preview_path);
-      }
-
-      if (filesToDelete.length > 0) {
-        await deleteR2Keys(filesToDelete).catch(() => undefined);
-      }
+    if (id.startsWith('r2:')) {
+      await deleteR2Keys([decodeURIComponent(id.slice(3))]);
+      return;
     }
 
-    const { error } = await supabase
-      .from('photos')
-      .delete()
-      .eq('id', id);
-
-    if (error) {
-      console.error("Error deleting photo:", error);
-    }
+    const token = id.match(/^[0-9a-f-]{36}/i)?.[0] || id;
+    const keys = [
+      `photos/${id}-full.jpg`,
+      `photos/${id}-preview.jpg`,
+      ...getPhotoPreviewVideoStorageKeys(token)
+    ];
+    await deleteR2Keys(keys);
+    await bestEffortSupabase('delete', () => supabase.from('photos').delete().eq('id', token));
   } catch (e) {
-    console.error("Error deleting photo:", e);
+    console.error('Error deleting photo:', e);
   }
 };
 
 export const clearGallery = async (): Promise<void> => {
   try {
-    const { data: photos } = await supabase
-      .from('photos')
-      .select('storage_path, preview_path');
-
-    if (photos) {
-      const filesToDelete: string[] = [];
-      photos.forEach(p => {
-        if (p.storage_path) filesToDelete.push(p.storage_path);
-        if (p.preview_path) filesToDelete.push(p.preview_path);
-      });
-
-      if (filesToDelete.length > 0) {
-        await deleteR2Keys(filesToDelete).catch(() => undefined);
-      }
+    const objects = await listR2Objects('all');
+    const keys = objects.map(object => object.key);
+    for (let i = 0; i < keys.length; i += 500) {
+      await deleteR2Keys(keys.slice(i, i + 500));
     }
-
-    const { error } = await supabase
-      .from('photos')
-      .delete()
-      .neq('id', '00000000-0000-0000-0000-000000000000');
-
-    if (error) {
-      console.error("Error clearing gallery:", error);
-    }
+    await bestEffortSupabase('clear', () =>
+      supabase.from('photos').delete().neq('id', '00000000-0000-0000-0000-000000000000')
+    );
   } catch (e) {
-    console.error("Error clearing gallery:", e);
+    console.error('Error clearing gallery:', e);
   }
 };
