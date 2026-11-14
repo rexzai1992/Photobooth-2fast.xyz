@@ -239,7 +239,20 @@ export interface GalleryResult {
 // photos/<uuid>[-layer-N]-(full|preview).jpg
 const PHOTO_OBJECT_PATTERN = /^photos\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-layer-(\d+))?)-(full|preview)\.(?:jpe?g|png|webp)$/i;
 
+let galleryCache: { at: number; items: SavedPhoto[] } | null = null;
+const GALLERY_CACHE_MS = 60_000;
+const invalidateGalleryCache = () => { galleryCache = null; };
+
 const buildR2Gallery = async (): Promise<SavedPhoto[]> => {
+  if (galleryCache && Date.now() - galleryCache.at < GALLERY_CACHE_MS) {
+    return galleryCache.items;
+  }
+  const items = await buildR2GalleryUncached();
+  galleryCache = { at: Date.now(), items };
+  return items;
+};
+
+const buildR2GalleryUncached = async (): Promise<SavedPhoto[]> => {
   const objects = await listR2Objects('all');
 
   const groups = new Map<string, { full?: string; preview?: string; uploadedAt: number; phone?: string | null; layer?: number }>();
@@ -324,6 +337,7 @@ export const getGallery = async (page: number = 1, pageSize: number = 30): Promi
 };
 
 export const deletePhotoFromGallery = async (id: string): Promise<void> => {
+  invalidateGalleryCache();
   try {
     if (id.startsWith('r2:')) {
       await deleteR2Keys([decodeURIComponent(id.slice(3))]);
@@ -344,6 +358,7 @@ export const deletePhotoFromGallery = async (id: string): Promise<void> => {
 };
 
 export const clearGallery = async (): Promise<void> => {
+  invalidateGalleryCache();
   try {
     const objects = await listR2Objects('all');
     const keys = objects.map(object => object.key);

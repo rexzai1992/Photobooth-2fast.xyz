@@ -52,7 +52,11 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
   const [customStickers, setCustomStickers] = useState<CustomSticker[]>([]);
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const [selectedPhoto, setSelectedPhoto] = useState<SavedPhoto | null>(null);
-  const [hasMorePhotos, setHasMorePhotos] = useState(true);
+  const [, setHasMorePhotos] = useState(true);
+  const PHOTOS_PER_PAGE = 40;
+  const [photoPage, setPhotoPage] = useState(1);
+  const [photoTotalPages, setPhotoTotalPages] = useState(1);
+  const [photoTotal, setPhotoTotal] = useState(0);
 
   const [config, setConfig] = useState<ApiConfig>({ api_key: '', sender_number: '' });
   const [recipientNumber, setRecipientNumber] = useState('');
@@ -121,19 +125,29 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
     }
   };
 
-  const loadPhotos = async (loadMore: boolean = false) => {
-    if (loading || (loadMore && !hasMorePhotos)) return;
+  const loadPhotos = async (page: number | boolean = photoPage) => {
+    if (loading) return;
+    const targetPage = typeof page === 'number' ? Math.max(1, page) : photoPage;
 
-    setLoading(!loadMore);
+    setLoading(true);
 
     try {
-        // Load all photos at once for better scrolling experience
-        const result: GalleryResult = await getGallery(1, 1000); // Load up to 1000 photos
+        // One page at a time (PHOTOS_PER_PAGE) so the admin stays fast with hundreds of photos
+        const result: GalleryResult = await getGallery(targetPage, PHOTOS_PER_PAGE);
+        const totalPages = Math.max(1, result.totalPages);
+        if (targetPage > totalPages && result.total > 0) {
+            setLoading(false);
+            return loadPhotos(totalPages);
+        }
 
         setPhotos(result.photos);
+        setPhotoPage(targetPage);
+        setPhotoTotalPages(totalPages);
+        setPhotoTotal(result.total);
         setSelectedPhotoIds([]);
-        setHasMorePhotos(false); // Disable infinite scroll since we loaded everything
+        setHasMorePhotos(false);
         setCurrentPhotoIndex(0);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (e) {
         console.error(e);
     } finally {
@@ -490,8 +504,8 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
              </a>
              {activeTab === 'photos' && (
                <>
-                 <span className="hidden sm:inline">{photos.length} Media Items Loaded</span>
-                 <span className="sm:hidden">{photos.length} Items</span>
+                 <span className="hidden sm:inline">{photoTotal} Media Items • Page {photoPage}/{photoTotalPages}</span>
+                 <span className="sm:hidden">{photoTotal} Items • {photoPage}/{photoTotalPages}</span>
                  {selectedPhotoIds.length > 0 && (
                    <span className="hidden sm:inline text-amber-200 font-semibold">
                      {selectedPhotoIds.length} Selected
@@ -686,9 +700,39 @@ const AdminDashboard: React.FC<Props> = ({ onBack }) => {
 	                    ))}
 	                  </div>
 
-                  {!hasMorePhotos && photos.length > 0 && (
-                    <div className="mt-8 text-center py-4 text-slate-500 text-sm">
-                      All photos loaded • Scroll up to see all photos
+                  {photos.length > 0 && (
+                    <div className="mt-8 flex flex-wrap items-center justify-center gap-3 py-4 text-slate-300">
+                      <button
+                        onClick={() => loadPhotos(1)}
+                        disabled={photoPage <= 1 || loading}
+                        className="px-3 py-2 rounded border-2 border-slate-600 bg-slate-800 disabled:opacity-40 hover:bg-slate-700"
+                      >
+                        « First
+                      </button>
+                      <button
+                        onClick={() => loadPhotos(photoPage - 1)}
+                        disabled={photoPage <= 1 || loading}
+                        className="px-4 py-2 rounded border-2 border-slate-600 bg-slate-800 disabled:opacity-40 hover:bg-slate-700 flex items-center gap-1"
+                      >
+                        <ChevronLeft className="w-4 h-4" /> Prev
+                      </button>
+                      <span className="px-3 font-semibold text-amber-200">
+                        Page {photoPage} of {photoTotalPages}
+                      </span>
+                      <button
+                        onClick={() => loadPhotos(photoPage + 1)}
+                        disabled={photoPage >= photoTotalPages || loading}
+                        className="px-4 py-2 rounded border-2 border-slate-600 bg-slate-800 disabled:opacity-40 hover:bg-slate-700 flex items-center gap-1"
+                      >
+                        Next <ChevronRight className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => loadPhotos(photoTotalPages)}
+                        disabled={photoPage >= photoTotalPages || loading}
+                        className="px-3 py-2 rounded border-2 border-slate-600 bg-slate-800 disabled:opacity-40 hover:bg-slate-700"
+                      >
+                        Last »
+                      </button>
                     </div>
                   )}
 
