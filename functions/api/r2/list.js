@@ -1,4 +1,5 @@
-// Admin-only: list photos/videos stored in R2 (needs the X-Admin-Pin header).
+// List R2 objects. Photos/videos (prefix=photos, default) need the X-Admin-Pin header;
+// stickers (prefix=stickers) are public because the booth shows them to everyone.
 const VIDEO_EXTENSION_PATTERN = /\.(webm|mp4|mov|ogv)$/i;
 const IMAGE_EXTENSION_PATTERN = /\.(jpe?g|png|webp|gif)$/i;
 
@@ -25,7 +26,8 @@ const isAdmin = (request, env) => {
 export const onRequestOptions = async () => json({ success: true });
 
 export const onRequestGet = async ({ request, env }) => {
-  if (!isAdmin(request, env)) {
+  const prefix = new URL(request.url).searchParams.get('prefix') === 'stickers' ? 'stickers/' : 'photos/';
+  if (prefix === 'photos/' && !isAdmin(request, env)) {
     return json({ error: 'Admin PIN required' }, 401);
   }
   try {
@@ -40,7 +42,7 @@ export const onRequestGet = async ({ request, env }) => {
 
     do {
       const page = await bucket.list({
-        prefix: 'photos/',
+        prefix,
         cursor,
         limit: 1000,
         include: ['customMetadata']
