@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { BrowserRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, useNavigate } from 'react-router-dom';
 import { AppState, LayoutType } from './types';
 import LayoutSelection from './components/LayoutSelection';
 import CameraCapture from './components/CameraCapture';
@@ -8,11 +8,6 @@ import PhotoEditor from './components/PhotoEditor';
 import AdminDashboard from './components/AdminDashboard';
 import PhotoDownload from './components/PhotoDownload';
 import { Home, Power, X } from 'lucide-react';
-
-interface WakeLockSentinelLike {
-  released: boolean;
-  release: () => Promise<void>;
-}
 
 declare global {
   interface Window {
@@ -23,207 +18,8 @@ declare global {
   }
 }
 
-const HIDDEN_KIOSK_MENU_TAP_THRESHOLD = 7;
-const HIDDEN_KIOSK_MENU_RESET_MS = 10000;
-
-const KioskModeGuard: React.FC = () => {
-  const location = useLocation();
-  const isAdminRoute = location.pathname.startsWith('/admin');
-  const isDownloadRoute = location.pathname.startsWith('/download/');
-  const shouldForceKiosk = !isAdminRoute && !isDownloadRoute;
-  const [showFullscreenPrompt, setShowFullscreenPrompt] = useState(false);
-  const wakeLockRef = useRef<WakeLockSentinelLike | null>(null);
-
-  const enterFullscreen = useCallback(async () => {
-    if (!shouldForceKiosk) {
-      return true;
-    }
-
-    if (document.fullscreenElement) {
-      setShowFullscreenPrompt(false);
-      return true;
-    }
-
-    if (!document.documentElement.requestFullscreen) {
-      setShowFullscreenPrompt(false);
-      return true;
-    }
-
-    try {
-      await document.documentElement.requestFullscreen();
-      setShowFullscreenPrompt(false);
-      return true;
-    } catch (error) {
-      console.log('Kiosk fullscreen request was blocked until user interaction.', error);
-      setShowFullscreenPrompt(true);
-      return false;
-    }
-  }, [shouldForceKiosk]);
-
-  const exitFullscreen = useCallback(async () => {
-    if (!document.fullscreenElement || !document.exitFullscreen) {
-      return;
-    }
-
-    try {
-      await document.exitFullscreen();
-    } catch (error) {
-      console.log('Exit fullscreen failed on admin route.', error);
-    }
-  }, []);
-
-  const requestWakeLock = useCallback(async () => {
-    if (!shouldForceKiosk || wakeLockRef.current) {
-      return;
-    }
-
-    const navigatorWithWakeLock = navigator as Navigator & {
-      wakeLock?: {
-        request: (type: 'screen') => Promise<WakeLockSentinelLike>;
-      };
-    };
-
-    if (!navigatorWithWakeLock.wakeLock) {
-      return;
-    }
-
-    try {
-      wakeLockRef.current = await navigatorWithWakeLock.wakeLock.request('screen');
-    } catch (error) {
-      console.log('Wake lock request failed.', error);
-    }
-  }, [shouldForceKiosk]);
-
-  const releaseWakeLock = useCallback(async () => {
-    if (!wakeLockRef.current) {
-      return;
-    }
-
-    try {
-      await wakeLockRef.current.release();
-    } catch (error) {
-      console.log('Wake lock release failed.', error);
-    } finally {
-      wakeLockRef.current = null;
-    }
-  }, []);
-
-  useEffect(() => {
-    const previousUserSelect = document.body.style.userSelect;
-    const previousTouchAction = document.body.style.touchAction;
-    const previousOverscroll = document.body.style.overscrollBehavior;
-
-    if (shouldForceKiosk) {
-      document.body.style.userSelect = 'none';
-      document.body.style.touchAction = 'manipulation';
-      document.body.style.overscrollBehavior = 'none';
-    }
-
-    return () => {
-      document.body.style.userSelect = previousUserSelect;
-      document.body.style.touchAction = previousTouchAction;
-      document.body.style.overscrollBehavior = previousOverscroll;
-    };
-  }, [shouldForceKiosk]);
-
-  useEffect(() => {
-    if (!shouldForceKiosk) {
-      setShowFullscreenPrompt(false);
-      void releaseWakeLock();
-      void exitFullscreen();
-      return;
-    }
-
-    void enterFullscreen();
-    void requestWakeLock();
-
-    const handleFullscreenChange = () => {
-      const isFullscreen = Boolean(document.fullscreenElement);
-      setShowFullscreenPrompt(!isFullscreen);
-      if (isFullscreen) {
-        void requestWakeLock();
-      }
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        void enterFullscreen();
-        void requestWakeLock();
-      } else {
-        void releaseWakeLock();
-      }
-    };
-
-    const handleUserInteraction = () => {
-      if (!document.fullscreenElement) {
-        void enterFullscreen();
-      }
-    };
-
-    const handleContextMenu = (event: MouseEvent) => {
-      event.preventDefault();
-    };
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      const key = event.key.toLowerCase();
-      const ctrlLike = event.ctrlKey || event.metaKey;
-
-      const blockedShortcut =
-        (ctrlLike && ['l', 'n', 'r', 't', 'w'].includes(key)) ||
-        key === 'f5' ||
-        key === 'escape' ||
-        (event.altKey && (key === 'arrowleft' || key === 'arrowright'));
-
-      if (!blockedShortcut) {
-        return;
-      }
-
-      event.preventDefault();
-      event.stopPropagation();
-
-      if (!document.fullscreenElement) {
-        void enterFullscreen();
-      }
-    };
-
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('pointerdown', handleUserInteraction, { capture: true });
-    window.addEventListener('keydown', handleKeyDown, { capture: true });
-    window.addEventListener('contextmenu', handleContextMenu);
-
-    return () => {
-      document.removeEventListener('fullscreenchange', handleFullscreenChange);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('pointerdown', handleUserInteraction, { capture: true });
-      window.removeEventListener('keydown', handleKeyDown, { capture: true });
-      window.removeEventListener('contextmenu', handleContextMenu);
-    };
-  }, [shouldForceKiosk, enterFullscreen, exitFullscreen, requestWakeLock, releaseWakeLock]);
-
-  if (!shouldForceKiosk || !showFullscreenPrompt) {
-    return null;
-  }
-
-  return (
-    <div className="fixed inset-0 z-[120] bg-slate-950/95 backdrop-blur-sm flex items-center justify-center p-6">
-      <div className="w-full max-w-md bg-slate-900 border border-amber-200/20 rounded-2xl p-6 text-center shadow-2xl">
-        <h2 className="text-2xl font-serif text-amber-100 mb-2">Kiosk Mode</h2>
-        <p className="text-slate-300 mb-6">
-          Tap below to continue in full screen. Admin page is excluded from kiosk lock.
-        </p>
-        <button
-          onClick={() => {
-            void enterFullscreen();
-          }}
-          className="w-full bg-amber-200 text-slate-900 font-bold py-3 rounded-lg hover:bg-white transition-colors"
-        >
-          Continue Full Screen
-        </button>
-      </div>
-    </div>
-  );
-};
+const HIDDEN_APP_MENU_TAP_THRESHOLD = 7;
+const HIDDEN_APP_MENU_RESET_MS = 10000;
 
 const PhotoboothApp: React.FC = () => {
   const navigate = useNavigate();
@@ -236,7 +32,30 @@ const PhotoboothApp: React.FC = () => {
     captureVideos: [],
     stickers: []
   });
-  const [showKioskMenu, setShowKioskMenu] = useState(false);
+  const [showAppMenu, setShowAppMenu] = useState(false);
+
+  // Auto-update the website inside the booth: when a new build is deployed, reload
+  // as soon as the booth is back on the home screen (never in the middle of a session).
+  const stepRef = useRef(state.step);
+  const updateReadyRef = useRef(false);
+  useEffect(() => { stepRef.current = state.step; if (state.step === 'home' && updateReadyRef.current) window.location.reload(); }, [state.step]);
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const res = await fetch(`/version.json?t=${Date.now()}`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const { build } = await res.json();
+        if (build && build !== __BUILD_ID__) {
+          updateReadyRef.current = true;
+          if (stepRef.current === 'home') window.location.reload();
+        }
+      } catch {
+        // offline - try again later
+      }
+    };
+    const timer = window.setInterval(check, 5 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, []);
   const [closeAppError, setCloseAppError] = useState('');
 
   const handleLayoutSelect = (layout: LayoutType) => {
@@ -283,8 +102,8 @@ const PhotoboothApp: React.FC = () => {
     hiddenTapResetTimerRef.current = null;
   }, []);
 
-  const closeKioskMenu = useCallback(() => {
-    setShowKioskMenu(false);
+  const closeAppMenu = useCallback(() => {
+    setShowAppMenu(false);
     setCloseAppError('');
     hiddenTapCountRef.current = 0;
     clearHiddenTapResetTimer();
@@ -303,21 +122,21 @@ const PhotoboothApp: React.FC = () => {
       return;
     }
 
-    closeKioskMenu();
+    closeAppMenu();
     handleRestart();
-  }, [closeKioskMenu, handleRestart, state.step]);
+  }, [closeAppMenu, handleRestart, state.step]);
 
-  const handleHiddenKioskTap = useCallback(() => {
+  const handleHiddenAppMenuTap = useCallback(() => {
     setCloseAppError('');
-    if (showKioskMenu) {
+    if (showAppMenu) {
       return;
     }
 
     hiddenTapCountRef.current += 1;
-    if (hiddenTapCountRef.current >= HIDDEN_KIOSK_MENU_TAP_THRESHOLD) {
+    if (hiddenTapCountRef.current >= HIDDEN_APP_MENU_TAP_THRESHOLD) {
       hiddenTapCountRef.current = 0;
       clearHiddenTapResetTimer();
-      setShowKioskMenu(true);
+      setShowAppMenu(true);
       return;
     }
 
@@ -325,8 +144,8 @@ const PhotoboothApp: React.FC = () => {
     hiddenTapResetTimerRef.current = window.setTimeout(() => {
       hiddenTapCountRef.current = 0;
       hiddenTapResetTimerRef.current = null;
-    }, HIDDEN_KIOSK_MENU_RESET_MS);
-  }, [clearHiddenTapResetTimer, showKioskMenu]);
+    }, HIDDEN_APP_MENU_RESET_MS);
+  }, [clearHiddenTapResetTimer, showAppMenu]);
 
   const handleCloseApplication = useCallback(() => {
     setCloseAppError('');
@@ -337,7 +156,7 @@ const PhotoboothApp: React.FC = () => {
 
     window.close();
     window.setTimeout(() => {
-      setCloseAppError('Close app works only in desktop kiosk .exe mode.');
+      setCloseAppError('Close app works only in the desktop wrapper.');
     }, 400);
   }, []);
 
@@ -381,20 +200,20 @@ const PhotoboothApp: React.FC = () => {
       <main className="relative z-10 w-full h-full">
         <button
           type="button"
-          aria-label="Open kiosk menu"
-          onPointerDown={handleHiddenKioskTap}
+          aria-label="Open app menu"
+          onPointerDown={handleHiddenAppMenuTap}
           className="fixed top-0 right-0 z-[80] h-20 w-20 md:h-24 md:w-24 bg-transparent touch-manipulation"
         />
 
-        {showKioskMenu && (
+        {showAppMenu && (
           <div className="fixed top-4 right-4 z-[100] w-[min(90vw,280px)] rounded-2xl border border-amber-200/35 bg-slate-900/95 p-3 backdrop-blur-md shadow-2xl">
             <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-amber-100 font-serif text-sm tracking-wide">Kiosk Menu</h3>
+              <h3 className="text-amber-100 font-serif text-sm tracking-wide">App Menu</h3>
               <button
                 type="button"
-                onClick={closeKioskMenu}
+                onClick={closeAppMenu}
                 className="rounded-full border border-amber-200/30 bg-slate-800/80 p-1.5 text-amber-100 hover:bg-slate-700/90 transition-colors"
-                aria-label="Close kiosk menu"
+                aria-label="Close app menu"
               >
                 <X size={14} />
               </button>
@@ -474,7 +293,6 @@ const PhotoboothApp: React.FC = () => {
 const App: React.FC = () => {
   return (
     <BrowserRouter>
-      <KioskModeGuard />
       <Routes>
         <Route path="/" element={<PhotoboothApp />} />
         <Route path="/admin" element={<AdminDashboard onBack={() => window.location.href = '/'} />} />

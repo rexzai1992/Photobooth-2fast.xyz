@@ -102,21 +102,8 @@ function describeMediaAccess(permission, details) {
   return 'camera and microphone';
 }
 
-function shouldBlockShortcut(input) {
-  const key = (input.key || '').toLowerCase();
-  const ctrlOrMeta = input.control || input.meta;
-
-  if (key === 'f11') return true;
-  if (input.alt && key === 'f4') return true;
-  if (ctrlOrMeta && (key === 'r' || key === 'w')) return true;
-  if (ctrlOrMeta && input.shift && key === 'i') return true;
-  if (key === 'browserback' || key === 'browserforward') return true;
-
-  return false;
-}
-
 function configurePermissions() {
-  const allowedPermissions = new Set(['media', 'camera', 'microphone', 'fullscreen']);
+  const allowedPermissions = new Set(['media', 'camera', 'microphone']);
   const mediaPermissions = new Set(['media', 'camera', 'microphone']);
   const kioskConfig = readKioskConfig();
   const startUrl = getStartUrl(kioskConfig);
@@ -217,9 +204,7 @@ async function createMainWindow() {
     show: false,
     backgroundColor: '#000000',
     autoHideMenuBar: true,
-    frame: false,
-    fullscreen: true,
-    kiosk: app.isPackaged,
+    frame: true,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -242,15 +227,8 @@ async function createMainWindow() {
     shell.openExternal(url);
   });
 
-  mainWindow.webContents.on('before-input-event', (event, input) => {
-    if (!shouldBlockShortcut(input)) return;
-    event.preventDefault();
-  });
-
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
-    mainWindow.setFullScreen(true);
-    if (app.isPackaged) mainWindow.setKiosk(true);
   });
 
   try {
@@ -264,11 +242,47 @@ async function createMainWindow() {
   mainWindow.webContents.setVisualZoomLevelLimits(1, 1).catch(() => {});
 }
 
+// ---- Native auto-update (GitHub Releases) ----------------------------------------
+// Checks on start and every 2 hours. A new version downloads in the background and is
+// installed silently once the booth has been idle for 3 minutes (or on next app close).
+function configureAutoUpdate() {
+  if (!app.isPackaged) return;
+  let autoUpdater;
+  try {
+    ({ autoUpdater } = require('electron-updater'));
+  } catch (error) {
+    console.error('electron-updater not available', error);
+    return;
+  }
+  const { powerMonitor } = require('electron');
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  let installTimer = null;
+
+  autoUpdater.on('error', (error) => console.error('Auto-update error:', error?.message || error));
+  autoUpdater.on('update-available', (info) => console.log('Update available:', info?.version));
+  autoUpdater.on('update-downloaded', (info) => {
+    console.log('Update downloaded:', info?.version, '- will install when idle');
+    if (installTimer) clearInterval(installTimer);
+    installTimer = setInterval(() => {
+      if (powerMonitor.getSystemIdleTime() >= 180) {
+        clearInterval(installTimer);
+        autoUpdater.quitAndInstall(true, true); // silent install, then reopen the app
+      }
+    }, 30 * 1000);
+  });
+
+  const check = () => autoUpdater.checkForUpdates().catch((error) => console.error('Update check failed:', error?.message || error));
+  setTimeout(check, 20 * 1000);
+  setInterval(check, 2 * 60 * 60 * 1000);
+}
+
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   configureIpcHandlers();
   configurePermissions();
   await createMainWindow();
+  configureAutoUpdate();
 
   app.on('activate', async () => {
     if (BrowserWindow.getAllWindows().length === 0) {

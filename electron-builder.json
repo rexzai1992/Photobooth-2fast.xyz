@@ -26,5 +26,13 @@
     "createDesktopShortcut": true,
     "createStartMenuShortcut": true,
     "artifactName": "DeepBluePhotobooth-Setup-${version}.${ext}"
-  }
+  },
+  "publish": [
+    {
+      "provider": "github",
+      "owner": "rexzai1992",
+      "repo": "Photobooth-2fast.xyz",
+      "releaseType": "release"
+    }
+  ]
 }
