@@ -2,6 +2,38 @@ const R2_PUBLIC_URL = (import.meta.env.VITE_R2_PUBLIC_URL || '').replace(/\/+$/,
 const SUPABASE_PUBLIC_URL = (import.meta.env.VITE_SUPABASE_URL || '').replace(/\/+$/, '');
 
 const normalizeKey = (key: string): string => key.replace(/^\/+/, '').trim();
+
+// Admin PIN is checked on the server; we only keep what the admin typed for this browser session.
+const ADMIN_PIN_STORAGE_KEY = 'dbp_admin_pin';
+export const setAdminPin = (pin: string | null): void => {
+  try {
+    if (pin) sessionStorage.setItem(ADMIN_PIN_STORAGE_KEY, pin);
+    else sessionStorage.removeItem(ADMIN_PIN_STORAGE_KEY);
+  } catch {
+    // ignore storage errors
+  }
+};
+export const getAdminPin = (): string => {
+  try {
+    return sessionStorage.getItem(ADMIN_PIN_STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+};
+const adminHeaders = (): Record<string, string> => {
+  const pin = getAdminPin();
+  return pin ? { 'X-Admin-Pin': pin } : {};
+};
+
+export const verifyAdminPin = async (pin: string): Promise<boolean> => {
+  try {
+    const response = await fetch('/api/admin/verify', { method: 'POST', headers: { 'X-Admin-Pin': pin } });
+    const data = await response.json().catch(() => null) as { ok?: boolean } | null;
+    return Boolean(response.ok && data?.ok);
+  } catch {
+    return false;
+  }
+};
 const ABSOLUTE_URL_PATTERN = /^https?:\/\//i;
 
 const readErrorMessage = async (response: Response): Promise<string> => {
@@ -62,7 +94,7 @@ export const getPhotoDeliveryUrl = (key: string): string => {
   return proxyPath;
 };
 
-export const uploadBlobToR2 = async (key: string, blob: Blob, contentType?: string): Promise<string> => {
+export const uploadBlobToR2 = async (key: string, blob: Blob, contentType?: string, phoneNumber?: string): Promise<string> => {
   const normalizedKey = normalizeKey(key);
   if (!normalizedKey) {
     throw new Error('Missing R2 object key');
@@ -71,7 +103,9 @@ export const uploadBlobToR2 = async (key: string, blob: Blob, contentType?: stri
   const response = await fetch(`/api/r2/upload?key=${encodeURIComponent(normalizedKey)}`, {
     method: 'PUT',
     headers: {
-      'Content-Type': contentType || blob.type || 'application/octet-stream'
+      'Content-Type': contentType || blob.type || 'application/octet-stream',
+      ...adminHeaders(),
+      ...(phoneNumber ? { 'X-Meta-Phone': phoneNumber } : {})
     },
     body: blob
   });
@@ -97,7 +131,8 @@ export const deleteR2Keys = async (keys: string[]): Promise<void> => {
   const response = await fetch('/api/r2/delete', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      ...adminHeaders()
     },
     body: JSON.stringify({ keys: normalizedKeys })
   });
@@ -110,6 +145,51 @@ export const deleteR2Keys = async (keys: string[]): Promise<void> => {
   if (payload && payload.success === false) {
     throw new Error(payload.error || 'Failed to delete files from R2');
   }
+};
+
+export interface R2ObjectSummary {
+  key: string;
+  uploadedAt: number;
+  size: number;
+  phone?: string | null;
+}
+
+export const setR2PhotoPhone = async (keys: string[], phone: string): Promise<void> => {
+  const response = await fetch('/api/r2/meta', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keys: keys.map(normalizeKey), phone })
+  });
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+};
+
+export const listR2VideoObjects = async (): Promise<R2ObjectSummary[]> => listR2Objects('video');
+
+export const listR2Objects = async (type: 'video' | 'photo' | 'all' = 'all'): Promise<R2ObjectSummary[]> => {
+  const response = await fetch(`/api/r2/list${type === 'all' ? '' : `?type=${type}`}`, { headers: adminHeaders() });
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+
+  const payload = await response.json().catch(() => null) as {
+    objects?: Array<{ key?: string; uploaded?: string; size?: number; phone?: string | null }>;
+    error?: string;
+  } | null;
+
+  if (payload?.error) {
+    throw new Error(payload.error);
+  }
+
+  return (payload?.objects || [])
+    .filter(item => typeof item.key === 'string' && item.key)
+    .map(item => ({
+      key: item.key as string,
+      uploadedAt: item.uploaded ? Date.parse(item.uploaded) : Date.now(),
+      size: typeof item.size === 'number' ? item.size : 0,
+      phone: item.phone || null
+    }));
 };
 
 export const extractObjectKeyFromUrl = (value: string, defaultPrefix?: string): string | null => {

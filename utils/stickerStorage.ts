@@ -1,4 +1,3 @@
-import { supabase } from './supabase';
 import { deleteR2Keys, extractObjectKeyFromUrl, getR2PublicUrl, uploadBlobToR2 } from './r2Storage';
 
 export interface CustomSticker {
@@ -36,28 +35,18 @@ export const uploadStickers = async (files: File[]): Promise<{ success: CustomSt
     }
 
     try {
-      const fileExt = file.name.split('.').pop();
-      const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
-      const filePath = `stickers/${fileName}`;
+      // Stickers live only in R2 now (the old Supabase table is gone).
+      const fileExt = (file.name.split('.').pop() || 'png').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const safeName = file.name.replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'sticker';
+      const filePath = `stickers/${Date.now()}-${safeName}.${fileExt}`;
       await uploadBlobToR2(filePath, file, file.type);
-
-      const { data: dbData, error: dbError } = await supabase
-        .from('custom_stickers')
-        .insert({
-          name: file.name,
-          image_url: getR2PublicUrl(filePath),
-          file_type: file.type
-        })
-        .select()
-        .single();
-
-      if (dbError) {
-        await deleteR2Keys([filePath]).catch(() => undefined);
-        errors.push({ file: file.name, error: dbError.message });
-        continue;
-      }
-
-      success.push(dbData);
+      success.push({
+        id: filePath,
+        name: file.name,
+        image_url: getR2PublicUrl(filePath),
+        file_type: file.type,
+        created_at: new Date().toISOString()
+      });
     } catch (err) {
       errors.push({ file: file.name, error: err instanceof Error ? err.message : 'Unknown error' });
     }
@@ -66,19 +55,40 @@ export const uploadStickers = async (files: File[]): Promise<{ success: CustomSt
   return { success, errors };
 };
 
+const typeFromKey = (key: string): string => {
+  const ext = key.split('.').pop()?.toLowerCase();
+  if (ext === 'svg') return 'image/svg+xml';
+  if (ext === 'webp') return 'image/webp';
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  return 'image/png';
+};
+
+const nameFromKey = (key: string): string =>
+  (key.split('/').pop() || key)
+    .replace(/\.[^.]+$/, '')
+    .replace(/^\d{10,}-/, '')
+    .replace(/^deepblue-(text-)?/, '')
+    .replace(/[-_]+/g, ' ')
+    .trim();
+
 export const getCustomStickers = async (): Promise<CustomSticker[]> => {
   try {
-    const { data, error } = await supabase
-      .from('custom_stickers')
-      .select('*')
-      .order('created_at', { ascending: false });
-
-    if (error) {
-      console.error('Error fetching custom stickers:', error);
+    const response = await fetch('/api/r2/list?prefix=stickers');
+    if (!response.ok) {
+      console.error('Error fetching custom stickers:', response.status);
       return [];
     }
-
-    return data || [];
+    const payload = await response.json().catch(() => null) as { objects?: Array<{ key: string; uploaded?: string }> } | null;
+    return (payload?.objects || [])
+      .filter(item => /\.(png|webp|jpe?g|svg)$/i.test(item.key))
+      .sort((a, b) => (b.uploaded || '').localeCompare(a.uploaded || '') || a.key.localeCompare(b.key))
+      .map(item => ({
+        id: item.key,
+        name: nameFromKey(item.key),
+        image_url: getR2PublicUrl(item.key),
+        file_type: typeFromKey(item.key),
+        created_at: item.uploaded || new Date().toISOString()
+      }));
   } catch (err) {
     console.error('Error fetching custom stickers:', err);
     return [];
@@ -87,28 +97,12 @@ export const getCustomStickers = async (): Promise<CustomSticker[]> => {
 
 export const deleteCustomSticker = async (sticker: CustomSticker): Promise<boolean> => {
   try {
-    const objectKey = extractObjectKeyFromUrl(sticker.image_url, 'stickers');
-    if (objectKey) {
-      try {
-        await deleteR2Keys([objectKey]);
-      } catch (storageError) {
-        console.error('Error deleting sticker from R2:', storageError);
-      }
-    }
-
-    const { error: dbError } = await supabase
-      .from('custom_stickers')
-      .delete()
-      .eq('id', sticker.id);
-
-    if (dbError) {
-      console.error('Error deleting sticker from database:', dbError);
-      return false;
-    }
-
+    const objectKey = sticker.id.startsWith('stickers/') ? sticker.id : extractObjectKeyFromUrl(sticker.image_url, 'stickers');
+    if (!objectKey) return false;
+    await deleteR2Keys([objectKey]);
     return true;
   } catch (err) {
-    console.error('Error deleting custom sticker:', err);
+    console.error('Error deleting sticker:', err);
     return false;
   }
 };

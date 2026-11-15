@@ -1,22 +1,26 @@
 {
   "name": "deep-blue-photobooth",
-  "description": "Deep Blue Photobooth web app with Windows kiosk wrapper",
+  "description": "Deep Blue Photobooth web app with Windows desktop wrapper",
   "author": "Deep Blue",
   "private": true,
-  "version": "1.0.3",
+  "version": "1.0.7",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "encoder:up": "docker compose -f docker-compose.encoder.yml up -d --build",
+    "encoder:down": "docker compose -f docker-compose.encoder.yml down",
+    "encoder:logs": "docker compose -f docker-compose.encoder.yml logs -f video-encoder",
     "desktop:dev": "concurrently -k \"npm run dev\" \"wait-on tcp:5173 && cross-env ELECTRON_START_URL=http://localhost:5173 electron .\"",
     "desktop:build": "npm run build && electron-builder --config electron-builder.json --win nsis --x64",
-    "desktop:build:dir": "npm run build && electron-builder --config electron-builder.json --win --dir --x64"
+    "desktop:build:dir": "npm run build && electron-builder --config electron-builder.json --win --dir --x64",
+    "release": "npm version patch --no-git-tag-version && npm run build && electron-builder --config electron-builder.json --win nsis --x64 --publish always"
   },
   "dependencies": {
-    "@mediapipe/selfie_segmentation": "^0.1.1675465747",
     "@supabase/supabase-js": "^2.90.1",
+    "electron-updater": "^6.8.11",
     "lucide-react": "^0.344.0",
     "qrcode": "^1.5.4",
     "react": "^18.2.0",

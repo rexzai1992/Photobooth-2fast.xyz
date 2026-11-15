@@ -1,0 +1,177 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Deep Blue stickers</title>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@600;700&display=block" rel="stylesheet">
+<style>
+  :root { --bg: transparent; }
+  body { margin: 0; background: var(--bg); display: flex; flex-wrap: wrap; gap: 8px; font-family: Fredoka, sans-serif; }
+  .s { width: 512px; height: 512px; }
+  svg { width: 512px; height: 512px; overflow: visible; }
+</style></head>
+<body>
+<div id="out"></div>
+<script>
+// Original kawaii sea-creature sticker set for Deep Blue Photobooth.
+const L = '#2B2340';                 // outline colour
+const FILTER = `
+<defs>
+  <filter id="cut" x="-20%" y="-20%" width="140%" height="140%">
+    <feMorphology in="SourceAlpha" operator="dilate" radius="11" result="d"/>
+    <feFlood flood-color="#ffffff"/><feComposite in2="d" operator="in" result="white"/>
+    <feMorphology in="SourceAlpha" operator="dilate" radius="13" result="d2"/>
+    <feGaussianBlur in="d2" stdDeviation="5" result="b"/>
+    <feOffset dx="0" dy="6" in="b" result="ob"/>
+    <feFlood flood-color="#0b1a3a" flood-opacity="0.28"/><feComposite in2="ob" operator="in" result="shadow"/>
+    <feMerge><feMergeNode in="shadow"/><feMergeNode in="white"/><feMergeNode in="SourceGraphic"/></feMerge>
+  </filter>
+</defs>`;
+
+const face = (x, y, s = 1, mood = 'smile') => {
+  const e = 13 * s, gap = 30 * s;
+  const eyes = [-1, 1].map(k => `
+    <ellipse cx="${x + k * gap}" cy="${y}" rx="${e * 0.78}" ry="${e}" fill="${L}"/>
+    <circle cx="${x + k * gap + e * 0.28}" cy="${y - e * 0.4}" r="${e * 0.34}" fill="#fff"/>
+    <circle cx="${x + k * gap - e * 0.25}" cy="${y + e * 0.35}" r="${e * 0.16}" fill="#fff"/>`).join('');
+  const blush = [-1, 1].map(k => `<ellipse cx="${x + k * gap * 1.55}" cy="${y + 20 * s}" rx="${15 * s}" ry="${9 * s}" fill="#ff7ea8" opacity="0.6"/>`).join('');
+  const mouth = mood === 'open'
+    ? `<path d="M${x - 11 * s} ${y + 18 * s} Q${x} ${y + 40 * s} ${x + 11 * s} ${y + 18 * s} Z" fill="#c2365a" stroke="${L}" stroke-width="${4 * s}" stroke-linejoin="round"/>`
+    : `<path d="M${x - 12 * s} ${y + 18 * s} Q${x - 6 * s} ${y + 27 * s} ${x} ${y + 19 * s} Q${x + 6 * s} ${y + 27 * s} ${x + 12 * s} ${y + 18 * s}" fill="none" stroke="${L}" stroke-width="${4.5 * s}" stroke-linecap="round"/>`;
+  return eyes + blush + mouth;
+};
+const sp = (x, y, r, c = '#fff') => `<path d="M${x} ${y - r} Q${x + r * .18} ${y - r * .18} ${x + r} ${y} Q${x + r * .18} ${y + r * .18} ${x} ${y + r} Q${x - r * .18} ${y + r * .18} ${x - r} ${y} Q${x - r * .18} ${y - r * .18} ${x} ${y - r} Z" fill="${c}"/>`;
+const st = `stroke="${L}" stroke-width="9" stroke-linejoin="round" stroke-linecap="round"`;
+
+const S = {
+  octopus: `
+    ${[0,1,2,3,4,5].map(i => { const x = 150 + i * 42; return `<path d="M${x} 300 q${-20 + (i%2)*40} 70 ${(i%2?18:-18)} 120" fill="none" stroke="${L}" stroke-width="44" stroke-linecap="round"/><path d="M${x} 300 q${-20 + (i%2)*40} 70 ${(i%2?18:-18)} 120" fill="none" stroke="#ff8fbf" stroke-width="28" stroke-linecap="round"/>`; }).join('')}
+    <path d="M110 300 Q100 110 256 105 Q412 110 402 300 Q256 345 110 300 Z" fill="#ff9ec8" ${st}/>
+    <ellipse cx="200" cy="170" rx="34" ry="18" fill="#fff" opacity=".55" transform="rotate(-25 200 170)"/>
+    ${face(256, 235, 1.25)}`,
+  whale: `
+    <path d="M80 300 Q70 170 250 160 Q400 155 420 250 Q450 230 470 190 Q490 250 455 300 Q480 330 470 360 Q430 330 410 320 Q330 400 210 395 Q90 390 80 300 Z" fill="#6ec3ff" ${st}/>
+    <path d="M95 320 Q230 370 400 315 Q330 390 210 392 Q110 390 95 320 Z" fill="#dff3ff"/>
+    <path d="M230 160 q-10 -60 -45 -70 M230 160 q0 -70 10 -95 M230 160 q15 -60 50 -70" fill="none" stroke="#6ec3ff" stroke-width="16" stroke-linecap="round"/>
+    ${sp(330, 205, 16)}
+    ${face(205, 265, 1.15)}`,
+  jellyfish: `
+    ${[0,1,2,3,4].map(i => `<path d="M${170 + i * 43} 285 q${i%2?22:-22} 50 0 95 q${i%2?-22:22} 40 0 80" fill="none" stroke="#c7a8ff" stroke-width="16" stroke-linecap="round"/>`).join('')}
+    <path d="M120 290 Q115 120 256 115 Q397 120 392 290 Q360 270 330 292 Q300 270 270 292 Q240 270 210 292 Q180 270 150 292 Q135 280 120 290 Z" fill="#d9c4ff" ${st}/>
+    <ellipse cx="195" cy="175" rx="38" ry="18" fill="#fff" opacity=".6" transform="rotate(-25 195 175)"/>
+    ${face(256, 220, 1.1)}`,
+  pufferfish: `
+    ${Array.from({length: 14}, (_, i) => { const a = i / 14 * Math.PI * 2; const x1 = 256 + Math.cos(a) * 150, y1 = 266 + Math.sin(a) * 140, x2 = 256 + Math.cos(a) * 190, y2 = 266 + Math.sin(a) * 180; return `<path d="M${x1} ${y1} L${x2} ${y2}" stroke="${L}" stroke-width="14" stroke-linecap="round"/>`; }).join('')}
+    <ellipse cx="256" cy="266" rx="160" ry="150" fill="#ffd84d" ${st}/>
+    <path d="M410 266 l55 -45 v90 z" fill="#ffb02e" ${st}/>
+    <ellipse cx="256" cy="340" rx="110" ry="55" fill="#fff3b8"/>
+    ${face(240, 250, 1.3, 'open')}`,
+  turtle: `
+    <ellipse cx="256" cy="140" rx="62" ry="58" fill="#8fe39a" ${st}/>
+    ${[[-1,-1],[1,-1],[-1,1],[1,1]].map(([a,b]) => `<ellipse cx="${256 + a*150}" cy="${300 + b*85}" rx="55" ry="34" fill="#8fe39a" ${st} transform="rotate(${a*b*30} ${256 + a*150} ${300 + b*85})"/>`).join('')}
+    <ellipse cx="256" cy="300" rx="165" ry="130" fill="#3fae6b" ${st}/>
+    <path d="M256 190 L310 240 L295 310 L217 310 L202 240 Z M256 190 V172 M310 240 L380 225 M295 310 L345 370 M217 310 L167 370 M202 240 L132 225" fill="#62c98a" stroke="#2d8a52" stroke-width="7" stroke-linejoin="round"/>
+    ${face(256, 140, 0.8)}`,
+  starfish: `
+    <path d="M256 70 L305 200 L445 205 L335 290 L375 430 L256 350 L137 430 L177 290 L67 205 L207 200 Z" fill="#ff9f5a" ${st}/>
+    ${[[256,120],[390,215],[340,385],[172,385],[122,215]].map(([x,y]) => `<circle cx="${x}" cy="${y}" r="9" fill="#ffd0a8"/>`).join('')}
+    ${face(256, 260, 1.15)}`,
+  crab: `
+    <path d="M120 260 q-60 -30 -70 -110 M392 260 q60 -30 70 -110" fill="none" stroke="${L}" stroke-width="26" stroke-linecap="round"/>
+    <path d="M120 260 q-60 -30 -70 -110 M392 260 q60 -30 70 -110" fill="none" stroke="#ff6b6b" stroke-width="12" stroke-linecap="round"/>
+    <path d="M30 150 q20 -70 70 -40 q-25 15 -10 45 q-30 20 -60 -5 Z M482 150 q-20 -70 -70 -40 q25 15 10 45 q30 20 60 -5 Z" fill="#ff6b6b" ${st}/>
+    ${[-1,1].map(k => [0,1,2].map(i => `<path d="M${256 + k*120} ${330 + i*22} l${k*70} ${20 + i*12}" stroke="${L}" stroke-width="16" stroke-linecap="round"/>`).join('')).join('')}
+    <ellipse cx="256" cy="320" rx="150" ry="105" fill="#ff7b7b" ${st}/>
+    <path d="M200 210 v-50 M312 210 v-50" stroke="${L}" stroke-width="12" stroke-linecap="round"/>
+    <circle cx="200" cy="155" r="26" fill="#fff" ${st}/><circle cx="312" cy="155" r="26" fill="#fff" ${st}/>
+    <circle cx="205" cy="158" r="11" fill="${L}"/><circle cx="317" cy="158" r="11" fill="${L}"/>
+    <ellipse cx="185" cy="330" rx="18" ry="11" fill="#ffb3c8"/><ellipse cx="327" cy="330" rx="18" ry="11" fill="#ffb3c8"/>
+    <path d="M232 320 Q256 350 280 320" fill="none" stroke="${L}" stroke-width="7" stroke-linecap="round"/>`,
+  fish: `
+    <path d="M390 256 L475 190 Q455 256 475 322 Z" fill="#ff8a3d" ${st}/>
+    <ellipse cx="250" cy="256" rx="170" ry="120" fill="#ff8a3d" ${st}/>
+    <path d="M190 145 Q170 256 190 367 L235 372 Q215 256 235 140 Z M310 150 Q295 256 310 362 L345 350 Q332 256 345 162 Z" fill="#fff" stroke="${L}" stroke-width="6"/>
+    <path d="M230 140 q40 -60 100 -20 q-40 0 -60 30 z" fill="#ff8a3d" ${st}/>
+    ${face(150, 240, 0.95)}`,
+  seal: `
+    <ellipse cx="256" cy="300" rx="175" ry="140" fill="#c9d6e8" ${st}/>
+    <ellipse cx="256" cy="345" rx="110" ry="80" fill="#eef3fa"/>
+    <path d="M105 360 q-55 30 -40 70 q40 -10 70 -40 Z M407 360 q55 30 40 70 q-40 -10 -70 -40 Z" fill="#b3c3d9" ${st}/>
+    ${face(256, 260, 1.35)}
+    <ellipse cx="256" cy="282" rx="14" ry="10" fill="${L}"/>
+    ${[-1,1].map(k => `<path d="M${256 + k*30} 292 l${k*55} -6 M${256 + k*30} 300 l${k*55} 8" stroke="${L}" stroke-width="4" stroke-linecap="round"/>`).join('')}`,
+  penguin: `
+    <path d="M150 400 Q110 250 160 160 Q256 40 352 160 Q402 250 362 400 Q256 440 150 400 Z" fill="#2f3b66" ${st}/>
+    <path d="M190 390 Q160 260 205 190 Q256 140 307 190 Q352 260 322 390 Q256 410 190 390 Z" fill="#ffffff"/>
+    <path d="M150 260 q-55 40 -50 110 q40 -20 60 -60 Z M362 260 q55 40 50 110 q-40 -20 -60 -60 Z" fill="#2f3b66" ${st}/>
+    <path d="M200 415 q-10 30 25 25 M312 415 q10 30 -25 25" fill="#ffb02e" ${st}/>
+    ${face(256, 240, 1.0)}
+    <path d="M241 262 l15 16 l15 -16 z" fill="#ffb02e" stroke="${L}" stroke-width="5" stroke-linejoin="round"/>
+    <path d="M200 120 q56 -60 112 0" fill="none" stroke="#ff7ea8" stroke-width="20" stroke-linecap="round"/>`,
+  seahorse: `
+    <path d="M260 90 Q350 85 345 165 L405 175 L345 200 Q345 260 300 300 Q360 350 300 420 Q250 460 230 420 Q270 400 260 370 Q190 330 205 250 Q215 200 255 180 Q210 160 220 120 Q232 92 260 90 Z" fill="#ffc94d" ${st}/>
+    <path d="M222 175 l-40 -20 l20 40 z M210 235 l-45 0 l35 25 z M215 300 l-40 15 l40 10 z" fill="#ff9f43" ${st}/>
+    ${face(300, 140, 0.75)}`,
+  coral: `
+    <path d="M256 440 V300 M256 330 Q190 300 180 200 M180 230 Q140 210 135 160 M256 300 Q330 270 335 170 M335 220 Q380 200 385 150 M256 360 Q300 340 360 330" fill="none" stroke="${L}" stroke-width="48" stroke-linecap="round"/>
+    <path d="M256 440 V300 M256 330 Q190 300 180 200 M180 230 Q140 210 135 160 M256 300 Q330 270 335 170 M335 220 Q380 200 385 150 M256 360 Q300 340 360 330" fill="none" stroke="#ff7aa2" stroke-width="30" stroke-linecap="round"/>
+    ${[[180,200],[135,160],[335,170],[385,150],[360,330]].map(([x,y]) => `<circle cx="${x}" cy="${y}" r="9" fill="#ffd1e0"/>`).join('')}
+    <ellipse cx="256" cy="445" rx="90" ry="22" fill="#f5d59a" ${st}/>`,
+  shell: `
+    <path d="M256 90 Q420 100 440 300 Q350 330 256 420 Q162 330 72 300 Q92 100 256 90 Z" fill="#ffd6e7" ${st}/>
+    ${[-3,-2,-1,0,1,2,3].map(i => `<path d="M256 410 L${256 + i*55} ${150 - Math.abs(i)*10}" stroke="#f3a3c4" stroke-width="10" stroke-linecap="round"/>`).join('')}
+    <path d="M200 420 Q256 470 312 420 Q256 400 200 420 Z" fill="#ffd6e7" ${st}/>
+    <circle cx="256" cy="300" r="40" fill="#f5f2ff" ${st}/><circle cx="242" cy="286" r="12" fill="#fff"/>`,
+  bubbles: `
+    ${[[200,300,110],[340,190,70],[350,350,50],[130,150,45],[420,280,28]].map(([x,y,r]) => `<circle cx="${x}" cy="${y}" r="${r}" fill="#bfe9ff" fill-opacity=".85" ${st}/><path d="M${x - r*.55} ${y - r*.15} A${r*.6} ${r*.6} 0 0 1 ${x - r*.1} ${y - r*.6}" fill="none" stroke="#fff" stroke-width="${Math.max(6, r*.14)}" stroke-linecap="round"/>`).join('')}
+    ${face(200, 295, 0.95)}`,
+  heart: `
+    <path d="M256 430 Q90 330 85 200 Q85 105 175 100 Q235 100 256 160 Q277 100 337 100 Q427 105 427 200 Q422 330 256 430 Z" fill="#ff6fa3" ${st}/>
+    <ellipse cx="160" cy="175" rx="35" ry="20" fill="#fff" opacity=".6" transform="rotate(-35 160 175)"/>
+    ${face(256, 245, 1.2)}`,
+  crown: `
+    <path d="M90 360 L110 150 L190 250 L256 110 L322 250 L402 150 L422 360 Z" fill="#ffd84d" ${st}/>
+    <rect x="90" y="345" width="332" height="60" rx="18" fill="#ffc21a" ${st}/>
+    ${[[110,150],[256,110],[402,150]].map(([x,y]) => `<circle cx="${x}" cy="${y}" r="22" fill="#ff7ea8" ${st}/>`).join('')}
+    <circle cx="256" cy="375" r="18" fill="#6ec3ff" stroke="${L}" stroke-width="6"/><circle cx="175" cy="375" r="12" fill="#8fe39a" stroke="${L}" stroke-width="5"/><circle cx="337" cy="375" r="12" fill="#c7a8ff" stroke="${L}" stroke-width="5"/>`,
+  glasses: `
+    <path d="M70 230 H442" stroke="${L}" stroke-width="16" stroke-linecap="round"/>
+    ${[160, 352].map(x => `<path d="M${x} 340 Q${x - 105} 280 ${x - 95} 215 Q${x - 85} 170 ${x - 40} 180 Q${x - 10} 185 ${x} 215 Q${x + 10} 185 ${x + 40} 180 Q${x + 85} 170 ${x + 95} 215 Q${x + 105} 280 ${x} 340 Z" fill="#ff4f8b" ${st}/><ellipse cx="${x - 45}" cy="225" rx="20" ry="12" fill="#fff" opacity=".7" transform="rotate(-30 ${x - 45} 225)"/>`).join('')}`,
+  sparkles: `
+    ${sp(220, 260, 140, '#ffe46b')}${sp(380, 140, 70, '#9fe2ff')}${sp(390, 380, 50, '#ffb3d1')}${sp(110, 110, 40, '#c9b6ff')}
+    <path d="M220 120 Q238 242 360 260 Q238 278 220 400 Q202 278 80 260 Q202 242 220 120 Z" fill="none" stroke="${L}" stroke-width="9" stroke-linejoin="round"/>`,
+  anchor: `
+    <circle cx="256" cy="110" r="42" fill="none" stroke="${L}" stroke-width="40"/>
+    <circle cx="256" cy="110" r="42" fill="none" stroke="#ffd84d" stroke-width="22"/>
+    <path d="M256 150 V410 M170 200 H342 M110 300 Q130 420 256 420 Q382 420 402 300" fill="none" stroke="${L}" stroke-width="44" stroke-linecap="round"/>
+    <path d="M256 150 V410 M170 200 H342 M110 300 Q130 420 256 420 Q382 420 402 300" fill="none" stroke="#ffd84d" stroke-width="26" stroke-linecap="round"/>
+    <path d="M85 315 L110 270 L140 320 Z M427 315 L402 270 L372 320 Z" fill="#ffd84d" ${st}/>`
+};
+
+const TEXT = {
+  hello: ['HELLO!', '#ff6fa3', 'bubble'],
+  bestday: ['BEST DAY!', '#6ec3ff', 'bubble'],
+  squad: ['SQUAD', '#ffd84d', 'badge'],
+  deepblue: ['DEEP BLUE', '#3d7bff', 'wave'],
+  yay: ['YAY!', '#8fe39a', 'burst'],
+  love: ['LOVE YOU', '#ff4f8b', 'badge']
+};
+const textSticker = ([word, color, shape]) => {
+  const fs = word.length > 7 ? 80 : 104;
+  let base = '';
+  if (shape === 'bubble') base = `<path d="M60 120 Q60 70 120 70 H392 Q452 70 452 120 V300 Q452 350 392 350 H200 L130 430 L145 350 H120 Q60 350 60 300 Z" fill="${color}" ${st}/>`;
+  if (shape === 'badge') base = `<rect x="40" y="140" width="432" height="200" rx="100" fill="${color}" ${st}/>`;
+  if (shape === 'wave') base = `<path d="M40 180 Q148 120 256 180 Q364 240 472 180 V320 Q364 380 256 320 Q148 260 40 320 Z" fill="${color}" ${st}/>`;
+  if (shape === 'burst') base = `<path d="${Array.from({length: 24}, (_, i) => { const a = i / 24 * Math.PI * 2, r = i % 2 ? 150 : 210; return `${i ? 'L' : 'M'}${256 + Math.cos(a) * r} ${245 + Math.sin(a) * r}`; }).join(' ')} Z" fill="${color}" ${st}/>`;
+  const y = shape === 'bubble' ? 245 : shape === 'burst' ? 280 : 278;
+  return `${base}<text x="256" y="${y}" text-anchor="middle" font-family="Fredoka, sans-serif" font-weight="700" font-size="${fs}" fill="#fff" stroke="${L}" stroke-width="12" paint-order="stroke" stroke-linejoin="round">${word}</text>${sp(430, 95, 26)}`;
+};
+
+const out = document.getElementById('out');
+const all = Object.entries(S).map(([k, v]) => [k, v]).concat(Object.entries(TEXT).map(([k, v]) => ['text-' + k, textSticker(v)]));
+for (const [name, body] of all) {
+  const d = document.createElement('div');
+  d.className = 's'; d.id = name;
+  d.innerHTML = `<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">${FILTER}<g filter="url(#cut)" transform="translate(256 256) scale(0.84) translate(-256 -256)">${body}</g></svg>`;
+  out.appendChild(d);
+}
+window.STICKERS = all.map(([n]) => n);
+</script>
+</body></html>
